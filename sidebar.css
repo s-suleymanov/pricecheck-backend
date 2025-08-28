@@ -1,0 +1,45 @@
+ :host { all: initial; }
+.panel {
+  box-sizing: border-box;
+  height: 100vh;
+  width: 100%;
+  background: #f9f9f9;
+  border-right: 1px solid #ddd; /* left dock -> right border */
+  font: 14px system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+  color: #111;
+  display: flex;
+  flex-direction: column;
+}
+.header {
+  background: #fff;
+  border-bottom: 1px solid #e0e0e0;
+  padding: 14px 16px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.title { font-size: 16px; font-weight: 700; margin: 0; }
+.subtitle { font-size: 12px; color: #666; margin: 2px 0 0; }
+.content { padding: 16px; overflow: auto; }
+.section-title {
+  font-weight: 600; color: #555; margin-bottom: 8px;
+  text-transform: uppercase; font-size: 12px;
+}
+.card { background: #fff; border: 1px solid #e0e0e0; border-radius: 8px; padding: 12px; }
+.card + .card { margin-top: 16px; }
+.kv { margin: 4px 0; }
+.kv span { font-weight: 600; }
+.result-item {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 10px 0; border-bottom: 1px solid #f0f0f0;
+}
+.result-item:last-child { border-bottom: none; }
+.store-name { font-weight: 600; }
+.price { font-size: 16px; font-weight: 700; color: #0a8f00; }
+.link { color: #06c; text-decoration: none; font-size: 13px; }
+.link:hover { text-decoration: underline; }
+.status { color: #888; text-align: center; padding: 20px; }
+.xbtn { border: 0; background: transparent; font-size: 30px; cursor: pointer; }
+
+/* left dock -> grip sits on the right edge of the sidebar */
+.resize { position: absolute; right: -6px; top: 0; width: 6px; height: 100%; cursor: ew-resize; }
