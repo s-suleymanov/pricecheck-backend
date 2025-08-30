@@ -1,83 +1,76 @@
-// server.js - UPC Comparison API (SQLite)
-//important information
+// server.js - UPC Comparison API (PostgreSQL)
 
 const express = require('express');
-const sqlite3 = require('sqlite3').verbose();
-const path = require('path');
+// --- NEW: Import the Pool object from the pg library ---
+const { Pool } = require('pg');
 
 // --- Basic Setup ---
-const app = express();
-const PORT = 4000; // The port our server will run on. Must match manifest.json.
+// --- NEW: Use Render's port, or fallback to 4000 for local dev ---
+const PORT = process.env.PORT || 4000;
 
 // --- Middleware ---
-// A simple CORS middleware to allow our extension (from any origin) to make requests.
-// This is important for local development.
+// Simple CORS middleware, unchanged.
 app.use((req, res, next) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   next();
 });
 
-// --- Database Connection ---
-// Resolve the absolute path to the database file to avoid any confusion.
-const dbPath = path.resolve(__dirname, 'prices.db');
-// Create a new database connection. The connection is opened automatically.
-const db = new sqlite3.Database(dbPath, (err) => {
-  if (err) {
-    console.error("Error opening database file:", err.message);
-  } else {
-    console.log("✅ SUCCESS: Server is connected to SQLite database at:", dbPath);
+// --- NEW: PostgreSQL Database Connection ---
+// The Pool will automatically find and use the DATABASE_URL
+// environment variable when you deploy on Render.
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  // This is required for connecting to Render databases
+  ssl: {
+    rejectUnauthorized: false
   }
 });
 
-// --- API Endpoints ---
+console.log("✅ SUCCESS: Server is configured to connect to PostgreSQL.");
+
+// --- API Endpoints (Updated with async/await) ---
 /**
  * GET /v1/compare
- * The main endpoint for the extension. It searches the database for a given UPC.
- * Query Parameters:
- * - upc: The 12 or 13-digit UPC to search for.
- * - (asin, title are included but not used in this version)
- * Returns a JSON object with a 'results' array.
+ * Searches the PostgreSQL database for a given UPC.
  */
-app.get('/v1/compare', (req, res) => {
-  // Get the UPC from the query string and trim any whitespace.
+app.get('/v1/compare', async (req, res) => {
   const upc = (req.query.upc || '').trim();
-  // If no UPC is provided, return an empty array immediately.
   if (!upc) {
     return res.json({ results: [] });
   }
 
-  // SQL query to find a product by its UPC.
-  // Using CAST(upc AS TEXT) makes the comparison robust, avoiding text vs. number issues.
-  const sql = `SELECT * FROM products WHERE CAST(upc AS TEXT) = ? LIMIT 1`;
+  // --- NEW: PostgreSQL query syntax ---
+  // We use $1 as a placeholder instead of ?.
+  const sql = `SELECT * FROM products WHERE upc = $1 LIMIT 1`;
+  const params = [upc];
 
-  // Execute the query using db.get, which returns only the first matching row.
-  // The '?' in the SQL is safely replaced by the 'upc' variable to prevent SQL injection.
-  db.get(sql, [upc], (err, row) => {
-    // If there's a database error, log it and send a 500 server error response.
-    if (err) {
-      console.error("Database query error:", err.message);
-      return res.status(500).json({ results: [] });
-    }
-    // If no matching row is found, return an empty array.
+  try {
+    // --- NEW: Modern async/await query execution ---
+    const { rows } = await pool.query(sql, params);
+    const row = rows[0]; // Get the first result
+
     if (!row) {
       return res.json({ results: [] });
     }
 
-    // If a row is found, format it into the standard response object.
+    // Format the item, just like before.
     const item = {
       title: row.title,
       price_cents: row.price_cents,
       url: row.link,
       currency: "USD",
-      store: row.store || "Unknown Store" // Default value if store is not set
+      store: row.store || "Unknown Store"
     };
-    // Send the formatted item back to the extension.
+
     res.json({ results: [item] });
-  });
+  } catch (err) {
+    console.error("Database query error:", err.message);
+    return res.status(500).json({ results: [] });
+  }
 });
 
 // --- Start Server ---
-// Start listening for requests on the specified port.
 app.listen(PORT, () => {
-  console.log(`API server is up and running at http://localhost:${PORT}`);
+  console.log(`API server is up and running on port ${PORT}`);
 });
+

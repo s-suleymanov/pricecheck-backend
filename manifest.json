@@ -13,7 +13,6 @@
   "background": { "service_worker": "background.js" },
   "action": { "default_title": "PriceCheck" },
   "host_permissions": [
-    "https://api.yourhost.com/*",
     "https://pricecheck-api.onrender.com/*",
     "http://localhost:4000/*"
   ],
