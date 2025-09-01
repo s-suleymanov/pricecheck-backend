@@ -3,7 +3,6 @@
 // Try local first, then fallback to Render
 const API_BASES = [
   "https://pricecheck-backend.onrender.com",
-  "http://localhost:4000"
 ];
 
 // --- Caching ---

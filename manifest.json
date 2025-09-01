@@ -8,7 +8,7 @@
     "48": "icons/logo.png",
     "128": "icons/logo.png"
   },
-  "description": "Your all-in-one shopping assistant. PriceCheck instantly compares prices across multiple online stores, ensuring you always get the best deal.",
+  "description": "Your all-in-one shopping assistant. PriceCheck instantly compares prices across stores to help you find the best deal.",
   "permissions": ["storage", "scripting", "activeTab"],
   "background": { "service_worker": "background.js" },
   "action": { "default_title": "PriceCheck" },

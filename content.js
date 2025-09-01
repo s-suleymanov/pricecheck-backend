@@ -127,7 +127,7 @@ if (window.__PS_INJECTED__) {
   background: #fff; border-bottom: 1px solid #e0e0e0;
   padding: 14px 16px; display: flex; align-items: center; justify-content: space-between;
 }
-.title { font-size: 16px; font-weight: 700; margin: 0; }
+.title { font-size: 20px; font-weight: 700; margin: 0; }
 .subtitle { font-size: 14px; color: #666; margin: 0 0 0; }
 .content { padding: 16px; overflow: auto; flex-grow: 1; }
 .section-title { font-weight: 600; color: #555; margin-bottom: 8px; text-transform: uppercase; font-size: 12px; }
