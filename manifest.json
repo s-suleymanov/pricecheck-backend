@@ -13,10 +13,13 @@
   "background": { "service_worker": "background.js" },
   "action": { "default_title": "PriceCheck" },
   "host_permissions": [
-    "https://pricecheck-api.onrender.com/*"
+    "https://pricecheck-backend.onrender.com/*"
   ],
   "web_accessible_resources": [{
-    "resources": ["icons/target-circle.png"],
+    "resources": [
+      "icons/target-circle.png",
+      "icons/logo.png"
+    ],
     "matches": ["*://*.amazon.com/*", "*://*.amazon.co.uk/*", "*://*.amazon.de/*", "*://*.amazon.fr/*", "*://*.amazon.it/*", "*://*.amazon.es/*", "*://*.amazon.ca/*", "*://*.amazon.com.au/*", "*://*.amazon.co.jp/*", "*://*.amazon.com.mx/*", "*://*.amazon.in/*", "*://*.amazon.nl/*", "*://*.amazon.com.br/*", "*://*.amazon.com.tr/*", "*://*.amazon.ae/*", "*://*.amazon.sa/*", "*://*.amazon.sg/*"]
   }]
 }
