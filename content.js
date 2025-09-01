@@ -76,6 +76,10 @@ if (window.__PS_INJECTED__) {
   }
 
   // ---------- sidebar UI (inline, no external files) ----------
+  
+  // --- NEW: Get the correct, full URL for the icon from the extension package ---
+  const TARGET_ICON_URL = chrome.runtime.getURL('icons/target-circle.png');
+
   const INLINE_HTML = `
 <div class="panel">
   <div class="resize" id="ps-resize"></div>
@@ -119,7 +123,7 @@ if (window.__PS_INJECTED__) {
 .card { background: #fff; border: 1px solid #e0e0e0; border-radius: 8px; padding: 12px; }
 .card + .card { margin-top: 16px; }
 .kv { margin: 4px 0; } .kv span { font-weight: 600; }
-.result-item { display: flex; align-items: center; justify-content: space-between; padding: 10px 0; border-bottom: 1px solid #f0f0f0; }
+.result-item { display: block; padding: 10px 0; border-bottom: 1px solid #f0f0f0; } /* Changed to block */
 .result-item:last-child { border-bottom: none; }
 .store-name { font-weight: 600; }
 .price { font-size: 16px; font-weight: 700; color: #0a8f00; }
@@ -127,7 +131,12 @@ if (window.__PS_INJECTED__) {
 .link:hover { text-decoration: underline; }
 .status { color: #888; text-align: center; padding: 20px; }
 .xbtn { border: 0; background: transparent; font-size: 30px; cursor: pointer; }
-.resize { position: absolute; right: -6px; top: 0; width: 6px; height: 100%; cursor: ew-resize; }`;
+.resize { position: absolute; right: -6px; top: 0; width: 6px; height: 100%; cursor: ew-resize; }
+/* --- NEW: CSS for the icon and new layout --- */
+.result-header { display: flex; align-items: flex-start; justify-content: space-between; margin-bottom: 8px; }
+.store-info { display: flex; align-items: center; }
+.store-icon img { width: 24px; height: 24px; margin-right: 8px; } /* Style the image tag */
+`;
 
   const PS = {
     id: "pricecheck-sidebar-root",
@@ -136,7 +145,6 @@ if (window.__PS_INJECTED__) {
     root: null,
     shadow: null,
 
-    // create shadow UI synchronously from inline HTML+CSS
     async ensure() {
       if (this.root) return this.root;
       const root = document.createElement("div");
@@ -159,7 +167,6 @@ if (window.__PS_INJECTED__) {
       sh.appendChild(style);
       sh.appendChild(container);
 
-      // wire controls
       sh.querySelector("#ps-close")?.addEventListener("click", () => this.close());
       let resizing = false;
       sh.querySelector("#ps-resize")?.addEventListener("mousedown", (e) => {
@@ -200,38 +207,45 @@ if (window.__PS_INJECTED__) {
       if (upcEl)   upcEl.textContent   = snap.upc || "Not found on page";
       if (asinEl)  asinEl.textContent  = snap.asin || "N/A";
 
-      const statusEl  = $("#ps-status");
       const resultsEl = $("#ps-results");
-      if (!statusEl || !resultsEl) return;
+      if (!resultsEl) return;
+      
+      // Set initial status to searching
+      resultsEl.innerHTML = `<div class="status">Searching...</div>`;
 
       if (!snap.upc) {
-        statusEl.textContent = "UPC not found on this page.";
+        resultsEl.innerHTML = `<div class="status">UPC not found on this page.</div>`;
         return;
       }
 
-      statusEl.textContent = "Searching...";
       const resp = await safeSend({ type: "COMPARE_REQUEST", payload: { upc: snap.upc, asin: snap.asin, title: snap.title } });
       const list = Array.isArray(resp?.results) ? resp.results : [];
 
-      resultsEl.innerHTML = "";
+      // --- Corrected logic for displaying results ---
       if (!list.length) {
-        statusEl.textContent = "No matches found.";
+        // If the list is empty, show the "No product found" message.
+        resultsEl.innerHTML = `<div class="status">No product found.</div>`;
         return;
       }
 
+      // If we have results, clear the area and build the list.
+      resultsEl.innerHTML = "";
       for (const p of list) {
         const item = document.createElement("div");
         item.className = "result-item";
+        // --- NEW: Using an <img> tag with the correct URL ---
         item.innerHTML = `
-          <div>
-            <div class="store-name">${p.store || ""}</div>
-            <a href="${p.url}" target="_blank" rel="noopener" class="link">View Product</a>
+          <div class="result-header">
+            <div class="store-info">
+              <span class="store-icon"><img src="${TARGET_ICON_URL}" alt="Store Logo"></span>
+              <span class="store-name">${p.store || "Target"}</span>
+            </div>
+            <div class="price">${p.price_cents != null ? "$" + (p.price_cents / 100).toFixed(2) : "N/A"}</div>
           </div>
-          <div class="price">${p.price_cents != null ? "$" + (p.price_cents / 100).toFixed(2) : "N/A"}</div>
+          <a href="${p.url}" target="_blank" rel="noopener" class="link">View Product on Target.com</a>
         `;
         resultsEl.appendChild(item);
       }
-      statusEl.textContent = "";
     },
 
     async openSidebar() {
@@ -265,3 +279,4 @@ if (window.__PS_INJECTED__) {
 
   window.addEventListener("pageshow", (e) => { if (e.persisted && PS.open) { PS.applyPagePush(); PS.populate(); } });
 }
+
