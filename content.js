@@ -81,111 +81,17 @@ if (window.__PS_INJECTED__) {
   const TARGET_ICON_URL = chrome.runtime.getURL('icons/target-circle.png');
   const LOGO_ICON_URL = chrome.runtime.getURL('icons/logo.png')
 
-  const INLINE_HTML = `
-<div class="panel">
-  <div class="resize" id="ps-resize"></div>
-    <!-- Find the existing <div class="header">...</div> and replace it with this -->
-  <div class="header">
-    <div class="header-left">
-      <div class="header-icon"><img src="${LOGO_ICON_URL}" alt="PriceCheck Logo"></div>
-      <div>
-        <div class="title">PriceCheck</div>
-        <div class="subtitle">Comparison Tool</div>
-      </div>
-    </div>
-    <button id="ps-close" class="xbtn" title="Close">×</button>
-  </div>
-  <div class="content">
-    <div class="section-title">Current Product</div>
-    <div class="card">
-      <div class="kv"> <span id="ps-title">Loading...</span></div>
-      <div class="kv">UPC: <span id="ps-upc">Loading...</span></div>
-      <div class="kv">ASIN: <span id="ps-asin">Loading...</span></div>
-    </div>
-    <div class="section-title" style="margin:16px 0 8px 0;">Comparison Results</div>
-    <div class="card">
-      <div id="ps-results"><div class="status" id="ps-status">Searching...</div></div>
-    </div>
-  </div>
+  const HTML_URL = chrome.runtime.getURL("content.html");
+  const CSS_URL  = chrome.runtime.getURL("content.css");
 
-  <div class="footer">
-    <span class="footer-version">Version Beta</span>
-    <div class="footer-separator"></div>
-    <a href="mailto:pricecheckextension@gmail.com" class="footer-support">Contact Me</a>
-  </div>
-</div>`;
-
-  const INLINE_CSS = `
-:host { all: initial; }
-.panel {
-  box-sizing: border-box; height: 100vh; width: 100%;
-  background: #f9f9f9; border-right: 1px solid #ddd;
-  font: 16px system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
-  color: #111; display: flex; flex-direction: column; position: relative;
-}
-.header {
-  background: #fff; border-bottom: 1px solid #e0e0e0;
-  padding: 14px 16px; display: flex; align-items: center; justify-content: space-between;
-}
-.title { font-size: 20px; font-weight: 700; margin: 0; }
-.subtitle { font-size: 14px; color: #666; margin: 0 0 0; }
-.content { padding: 16px; overflow: auto; flex-grow: 1; }
-.section-title { font-weight: 600; color: #555; margin-bottom: 8px; text-transform: uppercase; font-size: 12px; }
-.card { background: #fff; border: 1px solid #e0e0e0; border-radius: 8px; padding: 12px; }
-.card + .card { margin-top: 16px; }
-.kv { margin: 4px 0; } .kv span { font-weight: 600; }
-.result-item { display: block; padding: 0 0; border-bottom: 1px solid #f0f0f0; }
-.result-item:last-child { border-bottom: none; }
-.store-name { font-weight: 600; }
-.price { font-size: 16px; font-weight: 700; color: #0a8f00; }
-.link { color: #06c; text-decoration: none; font-size: 14px; }
-.link:hover { text-decoration: underline; }
-.status { color: #888; text-align: center; padding: 20px; }
-.xbtn { border: 0; background: transparent; font-size: 30px; cursor: pointer; }
-.resize { position: absolute; right: -6px; top: 0; width: 6px; height: 100%; cursor: ew-resize; }
-.result-main { display: flex; align-items: center; justify-content: space-between; }
-.store-details { display: flex; align-items: center; }
-.store-text { display: flex; flex-direction: column; }
-.store-name { font-size: 18px; margin-bottom: 2px; }
-.price { font-size: 20px; } 
-.disclaimer {
-  font-style: italic;
-  font-size: 14px;
-  color: #888;
-  text-align: center;
-  margin-top: 12px;
-  padding-top: 8px;
-  border-top: 1px solid #f0f0f0;
-}
-.store-icon { display: flex;}
-.store-icon img { width: 36px; height: 36px; margin-right: 8px; }
-.header-left { display: flex; align-items: center; }
-.header-icon { display: flex; align-items: center; margin-right: 12px; }
-.header-icon img { width: 32px; height: 32px; }
-.footer {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 10px 16px;
-  background: #fff;
-  border-top: 1px solid #e0e0e0;
-  font-size: 16px;
-  color: #888;
-}
-.footer-separator {
-  width: 1px;
-  height: 14px;
-  background-color: #ddd;
-  margin: 0 10px;
-}
-.footer-support {
-  color: #06c;
-  text-decoration: none;
-}
-.footer-support:hover {
-  text-decoration: underline;
-}
-`;
+  const __assetCache = new Map();
+  async function loadAsset(url) {
+    if (__assetCache.has(url)) return __assetCache.get(url);
+    const res = await fetch(url);
+    const text = await res.text();
+    __assetCache.set(url, text);
+    return text;
+  }
 
   const PS = {
     id: "pricecheck-sidebar-root",
@@ -209,14 +115,32 @@ if (window.__PS_INJECTED__) {
       document.documentElement.appendChild(root);
 
       const sh = root.attachShadow({ mode: "open" });
+      // load external HTML and CSS
+      const [html, css] = await Promise.all([
+        loadAsset(HTML_URL,  { get value(){return __PC_HTML_CACHE}, set value(v){__PC_HTML_CACHE=v} }),
+        loadAsset(CSS_URL,   { get value(){return __PC_CSS_CACHE}, set value(v){__PC_CSS_CACHE=v} }),
+      ]);
+
+      // attach style
       const style = document.createElement("style");
-      style.textContent = INLINE_CSS;
+      style.textContent = css;
+
+      // attach markup
       const container = document.createElement("div");
-      container.innerHTML = INLINE_HTML;
+      container.innerHTML = html;
+
+      // mount into shadow
       sh.appendChild(style);
       sh.appendChild(container);
 
+      // wire up UI events
       sh.querySelector("#ps-close")?.addEventListener("click", () => this.close());
+
+      // set the logo src since the HTML file cannot use JS template vars
+      const logoEl = sh.querySelector("#ps-logo");
+      if (logoEl) logoEl.src = chrome.runtime.getURL("icons/logo.png");
+
+      // resizer
       let resizing = false;
       sh.querySelector("#ps-resize")?.addEventListener("mousedown", (e) => {
         e.preventDefault();
@@ -229,6 +153,7 @@ if (window.__PS_INJECTED__) {
         this.width = w; root.style.width = w + "px"; this.applyPagePush();
       });
       window.addEventListener("mouseup", () => { resizing = false; document.documentElement.style.cursor = ""; });
+
 
       this.root = root; this.shadow = sh;
       return root;
