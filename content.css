@@ -41,6 +41,7 @@
 .disclosure-toggle:hover { background-color: #f8f8f8; }
 .disclosure-toggle .arrow {
   font-size: 20px;
+  margin-right: 6px;
   font-weight: bold;
   transform: rotate(90deg);
   transition: transform 0.2s ease;

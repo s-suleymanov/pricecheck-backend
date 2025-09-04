@@ -16,15 +16,15 @@ app.use((req, res, next) => {
 });
 
 // Postgres pool
-// Set DATABASE_URL in Render dashboard
+// Set DATABASE_URL in your host environment
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  // Many Render Postgres instances require SSL
+  // Many hosted Postgres instances require SSL
   ssl: { rejectUnauthorized: false }
 });
 
 // Health
-app.get('/health', (req, res) => res.json({ ok: true, version: 'v1' }));
+app.get('/health', (req, res) => res.json({ ok: true, version: 'v2' }));
 
 // GET /v1/compare?upc=012345678901
 app.get('/v1/compare', async (req, res) => {
@@ -32,22 +32,25 @@ app.get('/v1/compare', async (req, res) => {
   if (!upc) return res.json({ results: [] });
 
   try {
+    // Return EVERY row for this UPC
+    // Use COALESCE to support either "link" or "url" column names in your table
     const { rows } = await pool.query(
       `
-      SELECT upc, title, price_cents, url, store
+      SELECT
+        upc,
+        COALESCE(title, '')               AS title,
+        price_cents,
+        COALESCE(link, url, '')           AS url,
+        store
       FROM products
       WHERE upc = $1
-      ORDER BY price_cents ASC NULLS LAST
-      LIMIT 1
+      ORDER BY price_cents ASC NULLS LAST, store ASC
       `,
       [upc]
     );
 
-    if (rows.length === 0) return res.json({ results: [] });
-
-    const r = rows[0] || {};
-    // Always include both naming styles
-    const item = {
+    // Map all rows
+    const results = rows.map(r => ({
       upc: r.upc || upc,
       title: r.title || '',
       product_name: r.title || '',
@@ -56,9 +59,9 @@ app.get('/v1/compare', async (req, res) => {
       price_cents: r.price_cents ?? null,
       store: r.store || 'Unknown Store',
       currency: 'USD'
-    };
+    }));
 
-    return res.json({ results: [item] });
+    return res.json({ results });
   } catch (err) {
     console.error('Database query error:', err);
     return res.status(500).json({ results: [] });
