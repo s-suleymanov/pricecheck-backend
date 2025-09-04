@@ -1,14 +1,14 @@
 {
   "manifest_version": 3,
-  "name": "PriceCheck Comparison Tool",
-  "version": "0.8.0",
+  "name": "PriceCheck: Your All-in-One Shopping Assistant",
+  "version": "0.8.2",
   "icons": {
     "16": "icons/logo.png",
     "32": "icons/logo.png",
     "48": "icons/logo.png",
     "128": "icons/logo.png"
   },
-  "description": "Your all-in-one shopping assistant. PriceCheck instantly compares prices across stores to help you find the best deal.",
+  "description": "PriceCheck instantly compares prices across stores to help you find the best deal.",
   "permissions": ["storage", "scripting", "activeTab"],
   "background": { "service_worker": "background.js" },
   "action": { "default_title": "PriceCheck" },

@@ -1,9 +1,10 @@
 <div class="panel">
   <div class="resize" id="ps-resize"></div>
+  
   <div class="header">
     <div class="header-left">
-      <div class="header-icon"><img id="ps-logo" alt="PriceCheck Logo"></div>
-      <div>
+      <img id="ps-logo" alt="PriceCheck Logo" class="header-icon">
+      <div class="header-text">
         <div class="title">PriceCheck</div>
         <div class="subtitle">Comparison Tool</div>
       </div>
@@ -11,23 +12,28 @@
     <button id="ps-close" class="xbtn" title="Close">×</button>
   </div>
 
-  <div class="content">
-    <div class="section-title">Current Product</div>
-    <div class="card">
-      <div class="kv"><span id="ps-title">Loading...</span></div>
-      <div class="kv">UPC: <span id="ps-upc">Loading...</span></div>
-      <div class="kv">ASIN: <span id="ps-asin">Loading...</span></div>
-    </div>
-
-    <div class="section-title" style="margin:16px 0 8px 0;">Comparison Results</div>
-    <div class="card">
-      <div id="ps-results"><div class="status" id="ps-status">Searching...</div></div>
+  <div class="disclosure">
+    <a href="#" class="disclosure-toggle" id="ps-details-toggle">
+      <span>See More Details</span>
+      <span class="arrow" id="ps-details-arrow">›</span>
+    </a>
+    <div class="disclosure-content" id="ps-details-content">
+      <div class="detail-item">
+        <strong>UPC:</strong> <span id="ps-upc-val">Loading...</span>
+      </div>
+      <div class="detail-item">
+        <strong>ASIN:</strong> <span id="ps-asin-val">Loading...</span>
+      </div>
     </div>
   </div>
 
+  <div class="content">
+      <div id="ps-results">
+          <div class="status">Loading...</div>
+      </div>
+  </div>
+
   <div class="footer">
-    <span class="footer-version">Version Beta</span>
-    <div class="footer-separator"></div>
-    <a href="mailto:pricecheckextension@gmail.com" class="footer-support">Contact Me</a>
+    <span>PriceCheck Beta</span>
   </div>
 </div>

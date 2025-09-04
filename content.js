@@ -29,25 +29,55 @@ if (window.__PS_INJECTED__) {
     return (fromUrl || fromAttr || "").toUpperCase() || null;
   };
 
-  // robust UPC finder on Amazon PDPs
+  // --- FIXED: Title now stops at the first comma or semicolon, or shows the full title. ---
+  const smartTruncate = (title) => {
+      if (!title) return "N/A";
+      const commaIndex = title.indexOf(',');
+      const semicolonIndex = title.indexOf(';');
+      
+      let endIndex = -1;
+
+      if (commaIndex > -1 && semicolonIndex > -1) {
+          endIndex = Math.min(commaIndex, semicolonIndex);
+      } else if (commaIndex > -1) {
+          endIndex = commaIndex;
+      } else if (semicolonIndex > -1) {
+          endIndex = semicolonIndex;
+      }
+
+      if (endIndex > -1) {
+          return title.substring(0, endIndex);
+      }
+      
+      return title; // Return the full title if no separator is found
+  };
+
+
+  const getPrice = () => {
+    const priceSelectors = [ '#corePrice_feature_div .a-offscreen', '.priceToPay .a-offscreen', '#price .a-offscreen', '#price_inside_buybox', '.a-price-whole' ];
+    for (const selector of priceSelectors) {
+        const el = document.querySelector(selector);
+        if (el && el.innerText) {
+            const priceText = el.innerText.replace(/[^0-9.]/g, '');
+            const price = parseFloat(priceText);
+            if (!isNaN(price)) return Math.round(price * 100);
+        }
+    }
+    return null;
+  };
+  
   function findUPC() {
-    const tableRowSelectors = [
-      "#prodDetails tr",
-      "table#productDetails_techSpec_section_1 tr",
-      "table#productDetails_detailBullets_sections1 tr",
-      "#technicalSpecifications_section_1 tr",
-      "#poExpander tr"
-    ];
+    const tableRowSelectors = ["#prodDetails tr","table#productDetails_techSpec_section_1 tr","table#productDetails_detailBullets_sections1 tr","#technicalSpecifications_section_1 tr","#poExpander tr"];
     for (const sel of tableRowSelectors) {
       for (const tr of document.querySelectorAll(sel)) {
-        const label = clean(tr.querySelector("th,.a-text-bold,.a-color-secondary,.label")?.innerText || tr.firstElementChild?.innerText || "");
+        const label = clean(tr.querySelector("th,.a-text-bold,.a-color-secondary,.label")?.innerText||tr.firstElementChild?.innerText||"");
         if (!/upc|ean|gtin/i.test(label)) continue;
-        const valEl = tr.querySelector("td:last-child") || tr.querySelector("td") || tr;
+        const valEl = tr.querySelector("td:last-child")||tr.querySelector("td")||tr;
         const upc = extractUPC(valEl.innerText);
         if (upc) return upc;
       }
     }
-    const bulletSelectors = ["#detailBullets_feature_div li", "#detailBulletsWrapper_feature_div li", "#detailBulletsWrapper_feature_div span"];
+    const bulletSelectors = ["#detailBullets_feature_div li","#detailBulletsWrapper_feature_div li","#detailBulletsWrapper_feature_div span"];
     for (const sel of bulletSelectors) {
       for (const el of document.querySelectorAll(sel)) {
         const txt = clean(el.innerText);
@@ -57,18 +87,16 @@ if (window.__PS_INJECTED__) {
         }
       }
     }
-    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+    const walker = document.createTreeWalker(document.body,NodeFilter.SHOW_TEXT);
     let node;
-    while ((node = walker.nextNode())) {
-      const t = clean(node.nodeValue || "");
+    while ((node=walker.nextNode())) {
+      const t = clean(node.nodeValue||"");
       if (!/upc/i.test(t)) continue;
-      let upc = extractUPC(t) || extractUPC(node.parentElement?.innerText || "");
+      let upc = extractUPC(t)||extractUPC(node.parentElement?.innerText||"");
       if (upc) return upc;
       const row = node.parentElement?.closest("tr,li,div,span,td,th");
       if (row) {
-        upc = extractUPC(row.innerText) ||
-              extractUPC(row.querySelector("td + td, th + td")?.innerText || "") ||
-              extractUPC(row.nextElementSibling?.innerText || "");
+        upc = extractUPC(row.innerText)||extractUPC(row.querySelector("td + td, th + td")?.innerText||"")||extractUPC(row.nextElementSibling?.innerText||"");
         if (upc) return upc;
       }
     }
@@ -76,14 +104,14 @@ if (window.__PS_INJECTED__) {
   }
 
   // ---------- sidebar UI (inline, no external files) ----------
-  
-  // --- CORRECTED: Use the correct method to get the icon's full URL ---
-  const TARGET_ICON_URL = chrome.runtime.getURL('icons/target-circle.png');
-  const LOGO_ICON_URL = chrome.runtime.getURL('icons/logo.png')
-
   const HTML_URL = chrome.runtime.getURL("content.html");
   const CSS_URL  = chrome.runtime.getURL("content.css");
-
+  const ICONS = {
+    'target': chrome.runtime.getURL('icons/target-circle.png'),
+    'amazon': chrome.runtime.getURL('icons/amazon-a.png'),
+    'default': chrome.runtime.getURL('icons/logo.png'),
+    'apple': chrome.runtime.getURL('icons/apple.png')
+  };
   const __assetCache = new Map();
   async function loadAsset(url) {
     if (__assetCache.has(url)) return __assetCache.get(url);
@@ -111,36 +139,27 @@ if (window.__PS_INJECTED__) {
       root.style.height = "100%";
       root.style.width = this.width + "px";
       root.style.zIndex = "2147483647";
-      root.style.display = "none";
+      root.style.transform = "translateX(-100%)"; // Start hidden
+      root.style.transition = "transform 160ms ease";
       document.documentElement.appendChild(root);
-
       const sh = root.attachShadow({ mode: "open" });
-      // load external HTML and CSS
-      const [html, css] = await Promise.all([
-        loadAsset(HTML_URL,  { get value(){return __PC_HTML_CACHE}, set value(v){__PC_HTML_CACHE=v} }),
-        loadAsset(CSS_URL,   { get value(){return __PC_CSS_CACHE}, set value(v){__PC_CSS_CACHE=v} }),
-      ]);
-
-      // attach style
-      const style = document.createElement("style");
-      style.textContent = css;
-
-      // attach markup
-      const container = document.createElement("div");
-      container.innerHTML = html;
-
-      // mount into shadow
-      sh.appendChild(style);
-      sh.appendChild(container);
-
-      // wire up UI events
+      const [html, css] = await Promise.all([loadAsset(HTML_URL), loadAsset(CSS_URL)]);
+      const style = document.createElement("style"); style.textContent = css;
+      const container = document.createElement("div"); container.innerHTML = html;
+      sh.appendChild(style); sh.appendChild(container);
       sh.querySelector("#ps-close")?.addEventListener("click", () => this.close());
-
-      // set the logo src since the HTML file cannot use JS template vars
       const logoEl = sh.querySelector("#ps-logo");
       if (logoEl) logoEl.src = chrome.runtime.getURL("icons/logo.png");
-
-      // resizer
+      
+      // --- NEW: Disclosure dropdown logic ---
+      sh.querySelector("#ps-details-toggle")?.addEventListener("click", (e) => {
+        e.preventDefault();
+        const content = sh.querySelector("#ps-details-content");
+        const arrow = sh.querySelector("#ps-details-arrow");
+        content.classList.toggle("open");
+        arrow.classList.toggle("open");
+      });
+      
       let resizing = false;
       sh.querySelector("#ps-resize")?.addEventListener("mousedown", (e) => {
         e.preventDefault();
@@ -153,89 +172,94 @@ if (window.__PS_INJECTED__) {
         this.width = w; root.style.width = w + "px"; this.applyPagePush();
       });
       window.addEventListener("mouseup", () => { resizing = false; document.documentElement.style.cursor = ""; });
-
-
       this.root = root; this.shadow = sh;
       return root;
     },
 
+    // --- FIXED: This now physically moves the entire page ---
     applyPagePush() {
-      const html = document.documentElement;
-      const body = document.body;
-      const on = this.open;
-      const pad = on ? this.width + "px" : "";
-
-      // animate only the body
-      if (!body.style.transition) body.style.transition = "padding-left 160ms ease";
-
-      // clear any previous pushes on <html>
-      html.style.paddingLeft = "";
-      html.style.marginLeft  = "";
-      html.style.overflowX   = "";
-
-      // push the page by padding the body
-      body.style.paddingLeft = pad;
-
-      // prevent bottom scrollbar while open
-      body.style.overflowX   = on ? "hidden" : "";
-
-      // remove the default UA 8px body margin while open, so no sliver remains
-      body.style.margin      = on ? "0" : "";
+        const html = document.documentElement;
+        html.style.transition = "padding-left 160ms ease";
+        if (this.open) {
+            html.style.paddingLeft = this.width + "px";
+            this.root.style.transform = "translateX(0%)";
+        } else {
+            html.style.paddingLeft = "0";
+            this.root.style.transform = "translateX(-100%)";
+        }
     },
 
 
     async populate() {
       const sh = this.shadow;
       const $ = (sel) => (sh ? sh.querySelector(sel) : null);
-
-      const snap = { title: getTitle(), upc: findUPC(), asin: getASIN() };
+      const snap = { title: getTitle(), upc: findUPC(), asin: getASIN(), price_cents: getPrice() };
       await safeSet({ lastSnapshot: snap });
 
-      const titleEl = $("#ps-title");
-      const upcEl   = $("#ps-upc");
-      const asinEl  = $("#ps-asin");
-      if (titleEl) titleEl.textContent = snap.title ? snap.title.slice(0, 80) : "N/A";
-      if (upcEl)   upcEl.textContent   = snap.upc || "Not found on page";
-      if (asinEl)  asinEl.textContent  = snap.asin || "N/A";
+      // --- NEW: Populate the disclosure content ---
+      const upcEl = $("#ps-upc-val");
+      const asinEl = $("#ps-asin-val");
+      if (upcEl) upcEl.textContent = snap.upc || "Not Found";
+      if (asinEl) asinEl.textContent = snap.asin || "N/A";
 
       const resultsEl = $("#ps-results");
       if (!resultsEl) return;
-      
       resultsEl.innerHTML = `<div class="status">Searching...</div>`;
 
       if (!snap.upc) {
         resultsEl.innerHTML = `<div class="status">UPC not found on this page.</div>`;
         return;
       }
-
-      const resp = await safeSend({ type: "COMPARE_REQUEST", payload: { upc: snap.upc, asin: snap.asin, title: snap.title } });
+      
+      const amazonPrice = snap.price_cents;
+      const resp = await safeSend({ type: "COMPARE_REQUEST", payload: { upc: snap.upc } });
       const list = Array.isArray(resp?.results) ? resp.results : [];
 
-      if (!list.length) {
-        resultsEl.innerHTML = `<div class="status">No product found.</div>`;
+      if (amazonPrice !== null) {
+          list.push({ store: 'Amazon', product_name: snap.title, price_cents: amazonPrice, url: window.location.href });
+      }
+      list.sort((a, b) => (a.price_cents || Infinity) - (b.price_cents || Infinity));
+      
+      if (list.length <= 1 && amazonPrice !== null) { // Show message if only Amazon is found
+        resultsEl.innerHTML = `<div class="status">No other prices found.</div>`;
+        // Still display the Amazon card
+        list.length = 1; 
+      } else if (list.length === 0) {
+        resultsEl.innerHTML = `<div class="status">No prices found.</div>`;
         return;
       }
 
       resultsEl.innerHTML = "";
+      const bestPrice = list[0].price_cents;
+
       for (const p of list) {
-        const item = document.createElement("div");
-        item.className = "result-item";
-        // Replace the old item.innerHTML with this new version
+        const item = document.createElement("a");
+        item.className = "result-card";
+        item.href = p.url;
+        item.target = "_blank";
+        item.rel = "noopener noreferrer";
+        const price = p.price_cents != null ? (p.price_cents / 100).toFixed(2) : "N/A";
+        let savings = 0; let isBestPrice = false;
+        if (amazonPrice !== null && p.price_cents !== null && p.price_cents < amazonPrice) {
+            savings = amazonPrice - p.price_cents;
+        } else if (p.price_cents === bestPrice) { isBestPrice = true; }
+        const storeKey = (p.store || 'default').toLowerCase();
+        const storeIcon = ICONS[storeKey] || ICONS['default'];
         item.innerHTML = `
-          <div class="result-main">
-            <div class="store-details">
-              <div class="store-icon"><img src="${TARGET_ICON_URL}" alt="Store Logo"></div>
-              <div class="store-text">
-                <div class="store-name">${p.store || "Target"}</div>
-                <a href="${p.url}" target="_blank" rel="noopener" class="link">View Product</a>
-              </div>
+            <div class="store-info">
+                <img src="${storeIcon}" alt="${p.store} logo" class="store-logo">
+                <div class="store-and-product">
+                    <span class="store-name">${p.store || "Unknown"}</span>
+                    <span class="product-name">${smartTruncate(p.product_name)}</span>
+                </div>
             </div>
-            <div class="price">${p.price_cents != null ? "$" + (p.price_cents / 100).toFixed(2) : "N/A"}</div>
-          </div>
-          <div class="disclaimer">
-            Delivery & handling fees not included.
-          </div>
+            <div class="price-info">
+                <span class="price">$${price}</span>
+                ${savings > 0 ? `<span class="savings-tag">Save $${(savings / 100).toFixed(2)}</span>` : 
+                (isBestPrice && p.store.toLowerCase() !== 'amazon' ? `<span class="savings-tag best-price">Best Price</span>` : '')}
+            </div>
         `;
+        if (p.store.toLowerCase() === 'amazon') item.classList.add('current-site');
         resultsEl.appendChild(item);
       }
     },
@@ -243,24 +267,19 @@ if (window.__PS_INJECTED__) {
     async openSidebar() {
       await this.ensure();
       this.open = true;
-      this.root.style.display = "block";
-      this.root.style.width = this.width + "px";
       this.applyPagePush();
       await this.populate();
     },
     close() {
       if (!this.root) return;
       this.open = false;
-      this.root.style.display = "none";
       this.applyPagePush();
     },
     toggle() { this.open ? this.close() : this.openSidebar(); }
   };
 
-  // init
   window.PS = PS;
   chrome.runtime?.onMessage.addListener((m) => { if (m?.type === "TOGGLE_SIDEBAR") PS.toggle(); });
-
   const mo = new MutationObserver(() => {
     if (PS.open) {
       clearTimeout(mo._t);
@@ -268,7 +287,5 @@ if (window.__PS_INJECTED__) {
     }
   });
   mo.observe(document, { childList: true, subtree: true });
-
   window.addEventListener("pageshow", (e) => { if (e.persisted && PS.open) { PS.applyPagePush(); PS.populate(); } });
 }
-
