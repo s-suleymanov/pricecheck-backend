@@ -1,4 +1,4 @@
-// server.js - UPC Comparison API
+// server.js - UPC Comparison API (return ALL rows)
 
 const express = require('express');
 const { Pool } = require('pg');
@@ -16,10 +16,8 @@ app.use((req, res, next) => {
 });
 
 // Postgres pool
-// Set DATABASE_URL in your host environment
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  // Many hosted Postgres instances require SSL
   ssl: { rejectUnauthorized: false }
 });
 
@@ -32,15 +30,14 @@ app.get('/v1/compare', async (req, res) => {
   if (!upc) return res.json({ results: [] });
 
   try {
-    // Return EVERY row for this UPC
-    // Use COALESCE to support either "link" or "url" column names in your table
+    // Return EVERY row for this UPC. No LIMIT. Use link or url column.
     const { rows } = await pool.query(
       `
       SELECT
         upc,
-        COALESCE(title, '')               AS title,
+        COALESCE(title, '')                 AS title,
         price_cents,
-        COALESCE(link, url, '')           AS url,
+        COALESCE(link, url, '')             AS url,
         store
       FROM products
       WHERE upc = $1
@@ -49,7 +46,6 @@ app.get('/v1/compare', async (req, res) => {
       [upc]
     );
 
-    // Map all rows
     const results = rows.map(r => ({
       upc: r.upc || upc,
       title: r.title || '',
