@@ -1,4 +1,4 @@
-// server.js - UPC Comparison API (return ALL rows)
+// server.js - UPC Comparison API (ALL rows, no 'link' anywhere)
 
 const express = require('express');
 const { Pool } = require('pg');
@@ -15,14 +15,14 @@ app.use((req, res, next) => {
   next();
 });
 
-// Postgres pool
+// Postgres
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false }
 });
 
 // Health
-app.get('/health', (req, res) => res.json({ ok: true, version: 'v2' }));
+app.get('/health', (_req, res) => res.json({ ok: true, version: 'v5' }));
 
 // GET /v1/compare?upc=012345678901
 app.get('/v1/compare', async (req, res) => {
@@ -30,14 +30,14 @@ app.get('/v1/compare', async (req, res) => {
   if (!upc) return res.json({ results: [] });
 
   try {
-    // Return EVERY row for this UPC. No LIMIT. Use link or url column.
+    // Return EVERY row for this UPC. No LIMIT. Only 'url'.
     const { rows } = await pool.query(
       `
       SELECT
         upc,
-        COALESCE(title, '')                 AS title,
+        COALESCE(title, '')  AS title,
         price_cents,
-        COALESCE(link, url, '')             AS url,
+        COALESCE(url, '')    AS url,
         store
       FROM products
       WHERE upc = $1
@@ -47,13 +47,12 @@ app.get('/v1/compare', async (req, res) => {
     );
 
     const results = rows.map(r => ({
-      upc: r.upc || upc,
-      title: r.title || '',
-      product_name: r.title || '',
-      url: r.url || '',
-      link: r.url || '',
-      price_cents: r.price_cents ?? null,
-      store: r.store || 'Unknown Store',
+      upc: r.upc,
+      title: r.title,
+      product_name: r.title,
+      url: r.url,
+      price_cents: r.price_cents,
+      store: r.store,
       currency: 'USD'
     }));
 
@@ -64,7 +63,7 @@ app.get('/v1/compare', async (req, res) => {
   }
 });
 
-// Start server
+// Start
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`API server running on port ${PORT}`);
 });
