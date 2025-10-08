@@ -1,19 +1,20 @@
-// server.js - ASIN-first compare API + resolver using price_feed only
+// server.js - compare by ASIN + resolve store_sku to ASIN using price_feed only
 
 const express = require('express');
-const cors = require('cors');
 const { Pool } = require('pg');
 
 const app = express();
 const PORT = process.env.PORT || 4000;
 
-// CORS first
-app.use(cors({
-  origin: '*',
-  methods: ['GET', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Accept']
-}));
-app.options('*', cors());
+// CORS - simple, global
+app.use((req, res, next) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Vary', 'Origin');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Accept');
+  if (req.method === 'OPTIONS') return res.sendStatus(200);
+  next();
+});
 
 // DB
 const pool = new Pool({
@@ -22,18 +23,18 @@ const pool = new Pool({
 });
 
 // Health
-app.get('/health', (_req, res) => res.json({ ok: true, version: 'v8' }));
+app.get('/health', (_req, res) => res.json({ ok: true, version: 'v8-no-cors-dep' }));
 
-// Helper: normalize per store
+// Helper - normalize per store
 function normalizeStoreKey(store, key) {
   if (!key) return '';
   const s = String(store || '').toLowerCase();
   let k = String(key || '').trim();
   if (s === 'target') {
-    k = k.replace(/^A[-\s]?/i, '');     // A-12345678 -> 12345678
-    k = k.replace(/[^0-9A-Z]/g, '');    // keep digits/letters
+    k = k.replace(/^A[-\s]?/i, '');   // A-12345678 -> 12345678
+    k = k.replace(/[^0-9A-Z]/g, '');  // keep digits and letters
   } else if (s === 'walmart' || s === 'bestbuy') {
-    k = k.replace(/\D+/g, '');          // digits only
+    k = k.replace(/\D+/g, '');        // digits only
   }
   return k;
 }
@@ -75,15 +76,15 @@ app.get('/v1/compare', async (req, res) => {
       seen_at: r.observed_at
     }));
 
-    return res.json({ results });
+    res.json({ results });
   } catch (err) {
     console.error('compare error:', err);
-    return res.status(500).json({ results: [] });
+    res.status(500).json({ results: [] });
   }
 });
 
 // GET /v1/resolve?store=Target&store_key=12345678
-// Uses price_feed as the mapping source: looks for any row where (store, store_sku) has an ASIN
+// Uses price_feed as the mapping source
 app.get('/v1/resolve', async (req, res) => {
   const store = String(req.query.store || '').trim();
   const keyRaw = String(req.query.store_key || '').trim();
@@ -102,10 +103,10 @@ app.get('/v1/resolve', async (req, res) => {
     `;
     const r = await pool.query(q, [store, key]);
     const asin = r.rows[0]?.asin ? String(r.rows[0].asin).toUpperCase() : null;
-    return res.json({ asin });
+    res.json({ asin });
   } catch (e) {
     console.error('resolve error:', e);
-    return res.json({ asin: null });
+    res.json({ asin: null });
   }
 });
 
