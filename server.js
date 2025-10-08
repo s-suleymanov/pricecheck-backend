@@ -92,3 +92,45 @@ app.listen(PORT, '0.0.0.0', () => {
 
 process.on('SIGINT', async () => { try { await pool.end(); } finally { process.exit(0); } });
 process.on('SIGTERM', async () => { try { await pool.end(); } finally { process.exit(0); } });
+
+// server.js additions
+
+function normalizeStoreKey(store, key) {
+  if (!key) return "";
+  const s = String(store || "").toLowerCase();
+  let k = String(key || "").trim();
+  if (s === "target") {
+    k = k.replace(/^A[-\s]?/i, "");       // A-12345678 -> 12345678
+    k = k.replace(/[^0-9A-Z]/g, "");      // keep digits/letters
+  } else if (s === "walmart" || s === "bestbuy") {
+    k = k.replace(/\D+/g, "");            // digits only
+  }
+  return k;
+}
+
+// GET /v1/resolve?store=Target&store_key=12345678
+app.get('/v1/resolve', async (req, res) => {
+  const store = String(req.query.store || '').trim();
+  const keyRaw = String(req.query.store_key || '').trim();
+  const key = normalizeStoreKey(store, keyRaw);
+  if (!store || !key) return res.json({ asin: null });
+
+  try {
+    // Look inside price_feed for a row that already ties this store_sku to an ASIN
+    const q = `
+      SELECT asin
+      FROM public.price_feed
+      WHERE lower(store) = lower($1)
+        AND store_sku = $2
+        AND asin IS NOT NULL
+      ORDER BY observed_at DESC NULLS LAST
+      LIMIT 1
+    `;
+    const r = await pool.query(q, [store, key]);
+    const asin = r.rows[0]?.asin ? String(r.rows[0].asin).toUpperCase() : null;
+    return res.json({ asin });
+  } catch (e) {
+    console.error('resolve error:', e);
+    return res.json({ asin: null });
+  }
+});

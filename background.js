@@ -1,4 +1,4 @@
-// background.js - single content.js for all sites, compare + resolve
+// background.js - single content.js, compare + resolve using price_feed only
 
 const API_BASES = ["https://pricecheck-backend.onrender.com"];
 
@@ -40,18 +40,17 @@ async function apiResolve({ store, store_key, title }) {
   return { asin: null };
 }
 
-// toolbar click
 chrome.action.onClicked.addListener(async (tab) => {
   if (!tab?.id) return;
   if (!siteOK(tab.url || "")) return;
 
-  // Try toggle first
+  // try toggle first
   try {
     await chrome.tabs.sendMessage(tab.id, { type: "TOGGLE_SIDEBAR" });
     return;
   } catch {}
 
-  // Inject once, then toggle
+  // inject once then toggle
   try {
     await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["content.js"] });
   } catch {}
@@ -60,9 +59,8 @@ chrome.action.onClicked.addListener(async (tab) => {
   } catch {}
 });
 
-// messages
+// messages from content
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
-  // Amazon ASIN compare
   if (msg?.type === "COMPARE_REQUEST") {
     (async () => {
       const asin = (msg.payload?.asin || "").toUpperCase();
@@ -73,7 +71,6 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     return true;
   }
 
-  // Non-Amazon resolve then compare
   if (msg?.type === "RESOLVE_COMPARE_REQUEST") {
     (async () => {
       const { store, store_key, title } = msg.payload || {};

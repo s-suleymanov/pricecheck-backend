@@ -4,7 +4,7 @@
 
   const ROOT_ID = "pricecheck-sidebar-root";
 
-  // re-entry guard
+  // Re-entry guard
   if (globalThis.__PC_INIT_DONE__) {
     try {
       if (!globalThis.__PC_MSG_BOUND__) {
@@ -18,7 +18,7 @@
   }
   globalThis.__PC_INIT_DONE__ = true;
 
-  // utils
+  // ---------- utils ----------
   const hasChrome = () => typeof chrome !== "undefined" && chrome?.runtime?.id;
   const safeSet = async (kv) => { try { if (hasChrome()) await chrome.storage.local.set(kv); } catch {} };
   const safeSend = (msg) => new Promise((res) => { try { chrome.runtime.sendMessage(msg, (r) => res(r)); } catch { res(null); } });
@@ -32,19 +32,34 @@
     return "unknown";
   };
 
-  // price helpers
+  function normalizeStoreKey(store, key) {
+    if (!key) return "";
+    const s = String(store || "").toLowerCase();
+    let k = String(key || "").trim();
+    if (s === "target") {
+      k = k.replace(/^A[-\s]?/i, "");   // A-12345678 -> 12345678
+      k = k.replace(/[^0-9A-Z]/g, "");  // keep digits/letters
+    } else if (s === "walmart" || s === "bestbuy") {
+      k = k.replace(/\D+/g, "");        // digits only
+    }
+    return k;
+  }
+
+  // price helper
   const toCents = (txt = "") => {
     const n = parseFloat(String(txt).replace(/[^0-9.]/g, ""));
     return isNaN(n) ? null : Math.round(n * 100);
   };
 
-  // drivers per site
+  // ---------- drivers per site ----------
   const DRIVERS = {
     amazon: {
       store: "Amazon",
       getTitle() {
-        return clean(document.getElementById("productTitle")?.innerText ||
-                     document.querySelector("#title span")?.innerText || "");
+        return clean(
+          document.getElementById("productTitle")?.innerText ||
+          document.querySelector("#title span")?.innerText || ""
+        );
       },
       getPriceCents() {
         const sels = [
@@ -69,10 +84,8 @@
         const fromAttr = document.querySelector("[data-asin]")?.getAttribute("data-asin");
         return (fromUrl || fromAttr || "").toUpperCase() || null;
       },
-      getStoreKey() { return null; }, // not needed
-      productKey() {
-        return `${this.getASIN() || ""}|${location.pathname}`;
-      }
+      getStoreKey() { return null; },
+      productKey() { return `${this.getASIN() || ""}|${location.pathname}`; }
     },
 
     target: {
@@ -97,27 +110,28 @@
       },
       getASIN() { return null; },
       getStoreKey() {
+        // Prefer TCIN, normalize to digits/letters only
         const mPath = location.pathname.match(/\/A-([0-9A-Z]+)/i)?.[1];
         const mMeta = document.querySelector('meta[name="twitter:app:url:iphone"]')?.content?.match(/\/A-([0-9A-Z]+)/i)?.[1];
         const mText = document.body.innerText.match(/\bTCIN\s*[:#]?\s*([0-9A-Z]{5,})/i)?.[1];
-        const tcin = mPath || mMeta || mText || null;
-        if (tcin) return tcin;
+        const tcinRaw = mPath || mMeta || mText || null;
+        if (tcinRaw) return normalizeStoreKey("Target", tcinRaw);
 
-        // fallback UPC from ld+json or page
+        // Fallback UPC from ld+json or page text
         for (const s of document.querySelectorAll('script[type="application/ld+json"]')) {
           try {
             const j = JSON.parse(s.textContent.trim());
             const gtin = j?.gtin13 || j?.gtin12 || j?.sku;
-            if (gtin && /^\d{12,13}$/.test(gtin)) return gtin.length === 13 && gtin.startsWith("0") ? gtin.slice(1) : gtin;
+            if (gtin && /^\d{12,13}$/.test(gtin)) {
+              return gtin.length === 13 && gtin.startsWith("0") ? gtin.slice(1) : gtin;
+            }
           } catch {}
         }
         const m = document.body.innerText.match(/(^|[^\d])(\d{12,13})(?!\d)/);
         if (m) return m[2].length === 13 && m[2].startsWith("0") ? m[2].slice(1) : m[2];
         return null;
       },
-      productKey() {
-        return `${this.getStoreKey() || ""}|${location.pathname}`;
-      }
+      productKey() { return `${this.getStoreKey() || ""}|${location.pathname}`; }
     },
 
     walmart: {
@@ -128,20 +142,17 @@
                    document.querySelector('[data-automation-id="product-price"]') ||
                    document.querySelector('meta[itemprop="price"]');
         const raw = el?.getAttribute?.("content") || el?.textContent || "";
-        const cents = toCents(raw);
-        return cents;
+        return toCents(raw);
       },
       getASIN() { return null; },
       getStoreKey() {
         const m = location.pathname.match(/\/ip\/[^/]+\/(\d+)/);
-        if (m) return m[1]; // itemId
-        // try ld+json
+        if (m) return normalizeStoreKey("Walmart", m[1]); // itemId
         for (const s of document.querySelectorAll('script[type="application/ld+json"]')) {
-          try { const j = JSON.parse(s.textContent.trim()); if (j?.sku) return String(j.sku); } catch {}
+          try { const j = JSON.parse(s.textContent.trim()); if (j?.sku) return normalizeStoreKey("Walmart", String(j.sku)); } catch {}
         }
-        // meta
         const meta = document.querySelector('meta[property="product:retailer_item_id"]')?.content;
-        if (meta) return meta;
+        if (meta) return normalizeStoreKey("Walmart", meta);
         return null;
       },
       productKey() { return `${this.getStoreKey() || ""}|${location.pathname}`; }
@@ -149,7 +160,12 @@
 
     bestbuy: {
       store: "BestBuy",
-      getTitle() { return clean(document.querySelector(".sku-title h1")?.innerText || document.querySelector("h1")?.innerText || document.title); },
+      getTitle() {
+        return clean(
+          document.querySelector(".sku-title h1")?.innerText ||
+          document.querySelector("h1")?.innerText || document.title
+        );
+      },
       getPriceCents() {
         const el = document.querySelector(".priceView-hero-price span[aria-hidden='true']") ||
                    document.querySelector(".priceView-customer-price span");
@@ -159,16 +175,16 @@
       getStoreKey() {
         const t = document.querySelector(".sku-value")?.innerText || "";
         const m = t.match(/\d+/);
-        if (m) return m[0]; // SKU
+        if (m) return normalizeStoreKey("BestBuy", m[0]);
         const meta = document.querySelector('meta[name="skuId"]')?.content;
-        if (meta) return meta;
+        if (meta) return normalizeStoreKey("BestBuy", meta);
         return null;
       },
       productKey() { return `${this.getStoreKey() || ""}|${location.pathname}`; }
     }
   };
 
-  // assets
+  // ---------- assets ----------
   const HTML_URL = chrome.runtime.getURL("content.html");
   const CSS_URL  = chrome.runtime.getURL("content.css");
   const ICONS = {
@@ -187,6 +203,7 @@
     return text;
   }
 
+  // ---------- singleton controller ----------
   const PS = {
     id: ROOT_ID,
     width: 380,
@@ -199,7 +216,7 @@
     _inflight: null,
 
     async ensure() {
-      // kill accidental duplicates
+      // Kill accidental duplicates except the first
       const all = Array.from(document.querySelectorAll(`#${this.id}`));
       for (let i = 1; i < all.length; i++) all[i].remove();
 
@@ -234,12 +251,15 @@
       sh.appendChild(style);
       sh.appendChild(container);
 
+      // close button
       sh.querySelector("#ps-close")?.addEventListener("click", (e) => { e.preventDefault(); e.stopPropagation(); this.close(); });
+      // Esc to close
       window.addEventListener("keydown", (e) => { if (this.open && (e.key === "Escape" || e.key === "Esc")) this.close(); });
 
       const logoEl = sh.querySelector("#ps-logo");
       if (logoEl) logoEl.src = chrome.runtime.getURL("icons/logo.png");
 
+      // disclosure dropdown
       sh.querySelector("#ps-details-toggle")?.addEventListener("click", (e) => {
         e.preventDefault();
         const content = sh.querySelector("#ps-details-content");
@@ -248,7 +268,7 @@
         arrow?.classList.toggle("open");
       });
 
-      // Resizer
+      // resizer
       let resizing = false;
       sh.querySelector("#ps-resize")?.addEventListener("mousedown", (e) => {
         e.preventDefault();
@@ -321,21 +341,40 @@
           list.push({ store: "Amazon", product_name: snap.title, price_cents: snap.price_cents, url: location.href });
         }
       } else {
-        // non Amazon: resolve by store_key (your DB's store_sku)
+        // Non Amazon - resolve by store_sku
         const resp = await safeSend({
           type: "RESOLVE_COMPARE_REQUEST",
           payload: { store: D.store, store_key: snap.store_key || "", title: snap.title }
         });
-        if (asinEl) asinEl.textContent = resp?.asin || "Unknown";
+
+        const resolvedASIN = resp?.asin || null;
+        if (asinEl) asinEl.textContent = resolvedASIN || "Unknown";
+
         list = Array.isArray(resp?.results) ? resp.results.slice() : [];
 
-        // always include current store card
+        // Always include current store card
         list.push({ store: D.store, product_name: snap.title, price_cents: snap.price_cents, url: location.href });
 
-        // optional: if we could not resolve, add an Amazon search helper
-        if (!resp?.asin) {
-          const q = snap.store_key || snap.title || "";
-          list.push({ store: "Amazon", product_name: "Search for a match", price_cents: null, url: `https://www.amazon.com/s?k=${encodeURIComponent(q)}` });
+        // If ASIN resolved but no Amazon row came back, add a DP link with N/A price
+        const hasAmazon = list.some(p => (p.store || "").toLowerCase() === "amazon");
+        if (resolvedASIN && !hasAmazon) {
+          list.push({
+            store: "Amazon",
+            product_name: snap.title || "View on Amazon",
+            price_cents: null,
+            url: `https://www.amazon.com/dp/${resolvedASIN}`
+          });
+        }
+
+        // If no ASIN resolved, add an Amazon search card - prefer product name
+        if (!resolvedASIN) {
+          const q = snap.title || snap.store_key || "";
+          list.push({
+            store: "Amazon",
+            product_name: "Search for a match",
+            price_cents: null,
+            url: `https://www.amazon.com/s?k=${encodeURIComponent(q)}`
+          });
         }
       }
 
@@ -345,6 +384,7 @@
       }
       resultsEl.innerHTML = "";
 
+      // Sort by price, nulls last
       list.sort((a, b) => (a.price_cents ?? Infinity) - (b.price_cents ?? Infinity));
       const bestPrice = list[0].price_cents ?? Infinity;
 
@@ -436,7 +476,7 @@
       this._bindProductObservers();
       window.addEventListener("pageshow", (e) => { if (e.persisted && this.open) this.applyPagePush(); });
       globalThis.__PC_SINGLETON__ = this;
-      window.PS = this;
+      window.PS = this; // optional debug
     }
   };
 
