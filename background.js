@@ -1,22 +1,9 @@
-// background.js - Service Worker for the PriceCheck Extension
+// background.js - single content.js for all sites, compare + resolve
 
-// API base(s)
-const API_BASES = [
-  "https://pricecheck-backend.onrender.com",
-];
+const API_BASES = ["https://pricecheck-backend.onrender.com"];
 
-// --- Caching ---
-const cache = new Map();
-const TTL_MS = 5 * 60 * 1000;
-
-function getCache(key) {
-  const v = cache.get(key);
-  if (!v) return null;
-  if (Date.now() - v.t > TTL_MS) {
-    cache.delete(key);
-    return null;
-  }
-  return v.data;
+function siteOK(url = "") {
+  return /(amazon|target|walmart|bestbuy)\./i.test(url);
 }
 
 async function fetchJSON(url, opts) {
@@ -33,24 +20,38 @@ async function fetchJSON(url, opts) {
   }
 }
 
-async function fetchCompare(params) {
-  const qs = new URLSearchParams(params).toString();
-  for (const baseRaw of API_BASES) {
-    const base = baseRaw.replace(/\/+$/, "");
-    const url = `${base}/v1/compare?${qs}`;
+async function apiCompareByASIN(asin) {
+  const qs = new URLSearchParams({ asin }).toString();
+  for (const base of API_BASES) {
+    const url = `${base.replace(/\/+$/, "")}/v1/compare?${qs}`;
     const data = await fetchJSON(url);
-    if (data && Array.isArray(data.results)) {
-      return data;
-    }
+    if (data && Array.isArray(data.results)) return data;
   }
   return { results: [] };
 }
 
-// Toolbar click -> inject content.js and toggle sidebar
+async function apiResolve({ store, store_key, title }) {
+  const qs = new URLSearchParams({ store, store_key: store_key || "", title: title || "" }).toString();
+  for (const base of API_BASES) {
+    const url = `${base.replace(/\/+$/, "")}/v1/resolve?${qs}`;
+    const data = await fetchJSON(url);
+    if (data && typeof data.asin === "string") return data; // { asin: "B0..." } or { asin: null }
+  }
+  return { asin: null };
+}
+
+// toolbar click
 chrome.action.onClicked.addListener(async (tab) => {
   if (!tab?.id) return;
-  if (!/^https?:\/\/([a-z0-9-]+\.)*amazon\./i.test(tab.url || "")) return;
+  if (!siteOK(tab.url || "")) return;
 
+  // Try toggle first
+  try {
+    await chrome.tabs.sendMessage(tab.id, { type: "TOGGLE_SIDEBAR" });
+    return;
+  } catch {}
+
+  // Inject once, then toggle
   try {
     await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["content.js"] });
   } catch {}
@@ -59,29 +60,28 @@ chrome.action.onClicked.addListener(async (tab) => {
   } catch {}
 });
 
-// Handle compare request from content.js
+// messages
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
-  if (msg?.type !== "COMPARE_REQUEST") return;
-
-  const { asin } = msg.payload || {};
-  const key = JSON.stringify({ asin });
-
-  const hit = getCache(key);
-  if (hit) {
-    sendResponse(hit);
-    return;
+  // Amazon ASIN compare
+  if (msg?.type === "COMPARE_REQUEST") {
+    (async () => {
+      const asin = (msg.payload?.asin || "").toUpperCase();
+      if (!asin) return sendResponse({ results: [] });
+      const data = await apiCompareByASIN(asin);
+      sendResponse({ results: data.results || [] });
+    })();
+    return true;
   }
 
-  (async () => {
-    if (!asin) {
-      sendResponse({ results: [] });
-      return;
-    }
-    const data = await fetchCompare({ asin });
-    const payload = { results: Array.isArray(data?.results) ? data.results : [] };
-    cache.set(key, { t: Date.now(), data: payload });
-    sendResponse(payload);
-  })();
-
-  return true; // keep channel open for async sendResponse
+  // Non-Amazon resolve then compare
+  if (msg?.type === "RESOLVE_COMPARE_REQUEST") {
+    (async () => {
+      const { store, store_key, title } = msg.payload || {};
+      const r = await apiResolve({ store, store_key, title });
+      if (!r?.asin) return sendResponse({ results: [], asin: null });
+      const c = await apiCompareByASIN(r.asin);
+      sendResponse({ results: c.results || [], asin: r.asin });
+    })();
+    return true;
+  }
 });
