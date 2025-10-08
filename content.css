@@ -73,7 +73,7 @@
 .result-card:hover { border-color: #007bff; }
 .result-card.current-site { border: 2px solid #007bff; padding: 13px 15px; }
 .store-info { display: flex; align-items: center; gap: 12px; }
-.store-logo { width: 36px; height: 36px; border-radius: 50%; object-fit: contain; }
+.store-logo { width: 36px; height: 36px; object-fit: contain; }
 .store-and-product { display: flex; flex-direction: column; }
 .store-name { font-weight: 600; font-size: 15px; color: #333; }
 .product-name { font-size: 13px; color: #666; line-height: 1.3; } /* For multi-line titles */

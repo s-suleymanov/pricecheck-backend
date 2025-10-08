@@ -1,6 +1,6 @@
 // background.js - Service Worker for the PriceCheck Extension
 
-// Try local first, then fallback to Render
+// API base(s)
 const API_BASES = [
   "https://pricecheck-backend.onrender.com",
 ];
@@ -63,8 +63,8 @@ chrome.action.onClicked.addListener(async (tab) => {
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg?.type !== "COMPARE_REQUEST") return;
 
-  const { upc, asin, title } = msg.payload || {};
-  const key = JSON.stringify({ upc, asin, title });
+  const { asin } = msg.payload || {};
+  const key = JSON.stringify({ asin });
 
   const hit = getCache(key);
   if (hit) {
@@ -73,11 +73,15 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   }
 
   (async () => {
-    const data = await fetchCompare({ upc: upc || "", asin: asin || "", title: title || "" });
+    if (!asin) {
+      sendResponse({ results: [] });
+      return;
+    }
+    const data = await fetchCompare({ asin });
     const payload = { results: Array.isArray(data?.results) ? data.results : [] };
     cache.set(key, { t: Date.now(), data: payload });
     sendResponse(payload);
   })();
 
-  return true;
+  return true; // keep channel open for async sendResponse
 });

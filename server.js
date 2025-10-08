@@ -1,4 +1,4 @@
-// server.js - UPC Comparison API (ALL rows, no 'link' anywhere)
+// server.js - ASIN-first compare API (latest per store from price_feed)
 
 const express = require('express');
 const { Pool } = require('pg');
@@ -22,38 +22,48 @@ const pool = new Pool({
 });
 
 // Health
-app.get('/health', (_req, res) => res.json({ ok: true, version: 'v5' }));
+app.get('/health', (_req, res) => res.json({ ok: true, version: 'v6' }));
 
-// GET /v1/compare?upc=012345678901
+// GET /v1/compare?asin=B0XXXXXX
 app.get('/v1/compare', async (req, res) => {
-  const upc = String(req.query.upc || '').trim();
-  if (!upc) return res.json({ results: [] });
+  const asin = String(req.query.asin || '').trim().toUpperCase();
+  if (!asin || !/^[A-Z0-9]{10}$/.test(asin)) {
+    return res.json({ results: [] });
+  }
 
   try {
-    // Return EVERY row for this UPC. No LIMIT. Only 'url'.
+    // Latest price per store for this ASIN
+    // DISTINCT ON picks the most recent row per store
     const { rows } = await pool.query(
       `
-      SELECT
-        upc,
-        COALESCE(title, '')  AS title,
-        price_cents,
-        COALESCE(url, '')    AS url,
-        store
-      FROM products
-      WHERE upc = $1
+      WITH latest AS (
+        SELECT DISTINCT ON (store)
+          store,
+          asin,
+          url,
+          COALESCE(title, '')        AS title,
+          price_cents,
+          observed_at
+        FROM public.price_feed
+        WHERE asin = $1
+        ORDER BY store, observed_at DESC
+      )
+      SELECT store, asin, url, title, price_cents, observed_at
+      FROM latest
       ORDER BY price_cents ASC NULLS LAST, store ASC
       `,
-      [upc]
+      [asin]
     );
 
+    // Normalize to the extension's result shape
     const results = rows.map(r => ({
-      upc: r.upc,
-      title: r.title,
-      product_name: r.title,
-      url: r.url,
-      price_cents: r.price_cents,
       store: r.store,
-      currency: 'USD'
+      product_name: r.title,
+      price_cents: r.price_cents,
+      url: r.url,
+      currency: 'USD',
+      asin: r.asin,
+      seen_at: r.observed_at
     }));
 
     return res.json({ results });
@@ -71,3 +81,4 @@ app.listen(PORT, '0.0.0.0', () => {
 // Graceful shutdown
 process.on('SIGINT', async () => { try { await pool.end(); } finally { process.exit(0); } });
 process.on('SIGTERM', async () => { try { await pool.end(); } finally { process.exit(0); } });
+  

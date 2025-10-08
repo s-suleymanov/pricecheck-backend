@@ -1,4 +1,4 @@
-// content.js - Injects sidebar and scrapes product data (fixed singleton build)
+// content.js - Injects sidebar and scrapes product data (ASIN-first)
 (() => {
   "use strict";
 
@@ -19,14 +19,6 @@
   });
 
   const clean = (s = "") => s.replace(/[\u200E\u200F\u202A-\u202E]/g, "").replace(/\s+/g, " ").trim();
-
-  const extractUPC = (str) => {
-    const m = clean(str).match(/(?:^|[^\d])(\d{12,13})(?!\d)/);
-    if (!m) return null;
-    let c = m[1];
-    if (c.length === 13 && c.startsWith("0")) c = c.slice(1);
-    return c.length === 12 ? c : null;
-  };
 
   const getTitle = () =>
     clean(document.getElementById("productTitle")?.innerText ||
@@ -69,58 +61,17 @@
     return null;
   };
 
-  function findUPC() {
-    const tableRowSelectors = [
-      "#prodDetails tr",
-      "table#productDetails_techSpec_section_1 tr",
-      "table#productDetails_detailBullets_sections1 tr",
-      "#technicalSpecifications_section_1 tr",
-      "#poExpander tr"
-    ];
-    for (const sel of tableRowSelectors) {
-      for (const tr of document.querySelectorAll(sel)) {
-        const label = clean(tr.querySelector("th,.a-text-bold,.a-color-secondary,.label")?.innerText||tr.firstElementChild?.innerText||"");
-        if (!/upc|ean|gtin/i.test(label)) continue;
-        const valEl = tr.querySelector("td:last-child")||tr.querySelector("td")||tr;
-        const upc = extractUPC(valEl.innerText);
-        if (upc) return upc;
-      }
-    }
-    const bulletSelectors = ["#detailBullets_feature_div li","#detailBulletsWrapper_feature_div li","#detailBulletsWrapper_feature_div span"];
-    for (const sel of bulletSelectors) {
-      for (const el of document.querySelectorAll(sel)) {
-        const txt = clean(el.innerText);
-        if (/upc|ean|gtin/i.test(txt)) {
-          const upc = extractUPC(txt);
-          if (upc) return upc;
-        }
-      }
-    }
-    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
-    let node;
-    while ((node = walker.nextNode())) {
-      const t = clean(node.nodeValue || "");
-      if (!/upc/i.test(t)) continue;
-      let upc = extractUPC(t) || extractUPC(node.parentElement?.innerText || "");
-      if (upc) return upc;
-      const row = node.parentElement?.closest("tr,li,div,span,td,th");
-      if (row) {
-        upc = extractUPC(row.innerText) ||
-              extractUPC(row.querySelector("td + td, th + td")?.innerText || "") ||
-              extractUPC(row.nextElementSibling?.innerText || "");
-        if (upc) return upc;
-      }
-    }
-    return null;
-  }
-
   // ---------- sidebar assets ----------
   const HTML_URL = chrome.runtime.getURL("content.html");
   const CSS_URL  = chrome.runtime.getURL("content.css");
   const ICONS = {
     target:  chrome.runtime.getURL("icons/target-circle.png"),
-    amazon:  chrome.runtime.getURL("icons/amazon-a.png"),
+    amazon:  chrome.runtime.getURL("icons/amazon.png"),
     apple:   chrome.runtime.getURL("icons/apple.png"),
+    walmart: chrome.runtime.getURL("icons/walmart.png"),
+    bestbuy: chrome.runtime.getURL("icons/bestbuy.png"),
+    alibaba: chrome.runtime.getURL("icons/alibaba.png"),
+    dcll:    chrome.runtime.getURL("icons/dell.png"),
     default: chrome.runtime.getURL("icons/logo.png")
   };
   const __assetCache = new Map();
@@ -237,30 +188,29 @@
       const sh = this.shadow;
       const $ = (sel) => sh.querySelector(sel);
 
-      const snap = { title: getTitle(), upc: findUPC(), asin: getASIN(), price_cents: getPrice() };
+      const snap = { title: getTitle(), asin: getASIN(), price_cents: getPrice() };
       await safeSet({ lastSnapshot: snap });
 
-      const upcEl = $("#ps-upc-val");
       const asinEl = $("#ps-asin-val");
-      if (upcEl) upcEl.textContent = snap.upc || "Not Found";
-      if (asinEl) asinEl.textContent = snap.asin || "N/A";
+      if (asinEl) asinEl.textContent = snap.asin || "Not found";
 
       const resultsEl = $("#ps-results");
       if (!resultsEl) return;
       resultsEl.innerHTML = `<div class="status">Searching...</div>`;
 
-      if (!snap.upc) {
-        resultsEl.innerHTML = `<div class="status">UPC not found on this page.</div>`;
+      if (!snap.asin) {
+        resultsEl.innerHTML = `<div class="status">ASIN not found on this page.</div>`;
         return;
       }
 
       const amazonPrice = snap.price_cents;
-      const resp = await safeSend({ type: "COMPARE_REQUEST", payload: { upc: snap.upc } });
 
-      // Keep every row from the DB
+      // Ask background to compare by ASIN
+      const resp = await safeSend({ type: "COMPARE_REQUEST", payload: { asin: snap.asin } });
+
       let list = Array.isArray(resp?.results) ? resp.results.slice() : [];
 
-      // Only add the synthetic Amazon row if DB did not already return an Amazon row
+      // If DB didn't return an Amazon row, synthesize one from the page
       const hasAmazonAlready = list.some(p => (p.store || "").toLowerCase() === "amazon");
       if (!hasAmazonAlready && amazonPrice !== null) {
         list.push({
@@ -271,18 +221,15 @@
         });
       }
 
-      // If there is nothing to show at all, bail out early
       if (list.length === 0) {
         resultsEl.innerHTML = `<div class="status">No prices found.</div>`;
         return;
       }
       resultsEl.innerHTML = "";
 
-      // Sort by price but keep the full list
+      // Sort by price
       list.sort((a, b) => (a.price_cents ?? Infinity) - (b.price_cents ?? Infinity));
-
       const bestPrice = list[0].price_cents ?? Infinity;
-
 
       for (const p of list) {
         const item = document.createElement("a");
@@ -354,14 +301,9 @@
     },
 
     _productKey() {
-      // UPC or ASIN or path
+      // Track by ASIN + path (no UPC)
       const asin = getASIN() || "";
-      let upc = "";
-      try {
-        const m = document.body.innerText.match(/(^|[^\d])(\d{12,13})(?!\d)/);
-        upc = m ? m[2] : "";
-      } catch {}
-      return `${upc}|${asin}|${location.pathname}`;
+      return `${asin}|${location.pathname}`;
     },
 
     async _refreshIfChanged() {
