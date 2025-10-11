@@ -1,33 +1,33 @@
 <div class="panel">
   <div class="resize" id="ps-resize"></div>
-  
+
   <div class="header">
     <div class="header-left">
       <img id="ps-logo" alt="PriceCheck Logo" class="header-icon">
       <div class="header-text">
         <div class="title">PriceCheck</div>
         <div class="subtitle">0.8.4 Beta</div>
-      </div>  
+      </div>
     </div>
     <button id="ps-close" class="xbtn" title="Close">×</button>
   </div>
 
-  <div class="disclosure">
-    <a href="#" class="disclosure-toggle" id="ps-details-toggle">
-      <span>See More Details</span>
-      <span class="arrow" id="ps-details-arrow">›</span>
-    </a>
-    <div class="disclosure-content" id="ps-details-content">
-      <div class="detail-item">
-        <strong>ID:</strong> <span id="ps-asin-val">Loading...</span>
-      </div>
+  <!-- Subheader: ASIN line, then Variant on its own line (wraps, no ellipsis) -->
+  <div class="subheader">
+    <div class="asin-row">
+      <strong>ASIN</strong>
+      <span id="ps-asin-val">Loading...</span>
+    </div>
+    <div class="variant-row">
+      <strong>Variant</strong>
+      <span id="ps-variant-val">—</span>
     </div>
   </div>
 
   <div class="content">
-      <div id="ps-results">
-          <div class="status">Loading...</div>
-      </div>
+    <div id="ps-results">
+      <div class="status">Loading...</div>
+    </div>
   </div>
 
   <div class="footer">

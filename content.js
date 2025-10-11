@@ -61,6 +61,100 @@
           document.querySelector("#title span")?.innerText || ""
         );
       },
+      getVariantLabel() {
+  // 1) Try DOM-first (covers old + new twister UIs)
+  const pieces = [];
+  const domSelectors = [
+    // new button-style twister
+    '#twister .a-button-selected .a-button-text',
+    '#inline-twister-expander-content .a-button-selected .a-button-text',
+    // classic "selection" line
+    '#variation_color_name .selection',
+    '#variation_size_name .selection',
+    '#variation_style_name .selection',
+    '#variation_configuration .selection',
+    '#variation_pattern_name .selection'
+  ];
+  for (const sel of domSelectors) {
+    const el = document.querySelector(sel);
+    const t = el && el.textContent && el.textContent.trim();
+    if (t && !/^(Select|Choose)$/i.test(t) && !pieces.includes(t)) pieces.push(t);
+  }
+  if (pieces.length) return pieces.join(' ');
+
+  // 2) Fallback: parse page scripts for variationValues + selectedVariationValues
+  function tryParseWholeJSON(text) {
+    const t = (text || '').trim();
+    if ((t.startsWith('{') && t.endsWith('}')) || (t.startsWith('[') && t.endsWith(']'))) {
+      try { return JSON.parse(t); } catch { return null; }
+    }
+    return null;
+  }
+  function extractObjectForKey(text, key) {
+    const idx = text.indexOf(key);
+    if (idx === -1) return null;
+    let i = text.indexOf('{', idx);
+    if (i === -1) return null;
+    let depth = 0, start = i, end = -1, inStr = false, esc = false;
+    for (; i < text.length; i++) {
+      const ch = text[i];
+      if (inStr) {
+        if (esc) esc = false;
+        else if (ch === '\\') esc = true;
+        else if (ch === '"') inStr = false;
+      } else {
+        if (ch === '"') inStr = true;
+        else if (ch === '{') depth++;
+        else if (ch === '}') { depth--; if (depth === 0) { end = i; break; } }
+      }
+    }
+    if (start >= 0 && end > start) {
+      try { return JSON.parse(text.slice(start, end + 1)); } catch { return null; }
+    }
+    return null;
+  }
+
+  let variationValues = null;
+  let selectedVariationValues = null;
+
+  for (const sc of document.querySelectorAll('script')) {
+    const text = sc.textContent || '';
+    if (!variationValues && text.includes('"variationValues"')) {
+      const whole = tryParseWholeJSON(text);
+      if (whole?.variationValues && typeof whole.variationValues === 'object') {
+        variationValues = whole.variationValues;
+      } else {
+        const obj = extractObjectForKey(text, '"variationValues"');
+        if (obj && typeof obj === 'object') variationValues = obj;
+      }
+    }
+    if (!selectedVariationValues && text.includes('"selectedVariationValues"')) {
+      const whole = tryParseWholeJSON(text);
+      if (whole?.selectedVariationValues && typeof whole.selectedVariationValues === 'object') {
+        selectedVariationValues = whole.selectedVariationValues;
+      } else {
+        const obj = extractObjectForKey(text, '"selectedVariationValues"');
+        if (obj && typeof obj === 'object') selectedVariationValues = obj;
+      }
+    }
+    if (variationValues && selectedVariationValues) break;
+  }
+
+  if (variationValues && selectedVariationValues) {
+    const out = [];
+    for (const dim of Object.keys(variationValues)) {
+      const arr = variationValues[dim];
+      const idx = parseInt(selectedVariationValues[dim], 10);
+      if (Array.isArray(arr) && arr.length > 1 && Number.isFinite(idx)) {
+        const val = String(arr[idx] ?? '').trim();
+        if (val && !/^(Select|Choose)$/i.test(val)) out.push(val);
+      }
+    }
+    if (out.length) return out.join(' ');
+  }
+
+  return '';
+},
       getPriceCents() {
         const sels = [
           "#corePrice_feature_div .a-offscreen",
@@ -259,15 +353,6 @@
       const logoEl = sh.querySelector("#ps-logo");
       if (logoEl) logoEl.src = chrome.runtime.getURL("icons/logo.png");
 
-      // disclosure dropdown
-      sh.querySelector("#ps-details-toggle")?.addEventListener("click", (e) => {
-        e.preventDefault();
-        const content = sh.querySelector("#ps-details-content");
-        const arrow = sh.querySelector("#ps-details-arrow");
-        content?.classList.toggle("open");
-        arrow?.classList.toggle("open");
-      });
-
       // resizer
       let resizing = false;
       sh.querySelector("#ps-resize")?.addEventListener("mousedown", (e) => {
@@ -318,12 +403,15 @@
         title: D.getTitle(),
         asin: D.getASIN ? D.getASIN() : null,
         price_cents: D.getPriceCents ? D.getPriceCents() : null,
-        store_key: D.getStoreKey ? D.getStoreKey() : null
+        store_key: D.getStoreKey ? D.getStoreKey() : null,
+          variant_label: D.getVariantLabel ? D.getVariantLabel() : null
       };
       await safeSet({ lastSnapshot: snap });
 
-      const asinEl = $("#ps-asin-val");
-      asinEl && (asinEl.textContent = snap.asin || (site === "amazon" ? "Not found" : "Resolving..."));
+      sh.querySelector('#ps-variant-val').textContent = (snap.variant_label || '').trim?.() || '';
+      const asinEl = sh.querySelector('#ps-asin-val');
+      asinEl && (asinEl.textContent = snap.asin || (site === 'amazon' ? 'Not found' : 'Resolving...'));
+
 
       const resultsEl = $("#ps-results");
       if (!resultsEl) return;
@@ -407,7 +495,6 @@
             <img src="${storeIcon}" alt="${p.store || "Store"} logo" class="store-logo">
             <div class="store-and-product">
               <span class="store-name">${p.store || "Unknown"}</span>
-              <span class="product-name">${clean(p.product_name || "")}</span>
             </div>
           </div>
           <div class="price-info">
