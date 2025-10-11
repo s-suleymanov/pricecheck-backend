@@ -495,6 +495,7 @@
             <img src="${storeIcon}" alt="${p.store || "Store"} logo" class="store-logo">
             <div class="store-and-product">
               <span class="store-name">${p.store || "Unknown"}</span>
+              ${noteHtml}
             </div>
           </div>
           <div class="price-info">
