@@ -91,7 +91,8 @@ app.get('/v1/compare', async (req, res) => {
         NULLIF(v.amazon_price_cents, NULL) AS price_cents,
         v.amazon_observed_at AS observed_at,
         NULL::text AS url,
-        COALESCE(v.product_title, '') AS title
+        COALESCE(v.product_title, '') AS title,
+        NULL::text AS notes
       FROM the_variant v
       UNION ALL
       SELECT
