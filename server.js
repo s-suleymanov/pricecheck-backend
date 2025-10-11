@@ -79,7 +79,8 @@ app.get('/v1/compare', async (req, res) => {
       other_stores AS (
         SELECT l.store, l.store_sku, l.url,
                l.current_price_cents AS price_cents,
-               l.current_price_observed_at AS observed_at
+               l.current_price_observed_at AS observed_at,
+               l.notes
         FROM public.listings l
         JOIN the_variant v ON v.variant_id = l.variant_id
       )
@@ -95,7 +96,8 @@ app.get('/v1/compare', async (req, res) => {
       UNION ALL
       SELECT
         o.store, (SELECT asin FROM the_variant), o.store_sku, o.price_cents, o.observed_at, o.url,
-        NULL::text AS title
+        NULL::text AS title,
+        o.notes
       FROM other_stores o
       ORDER BY price_cents ASC NULLS LAST, store ASC;
     `;
@@ -110,7 +112,8 @@ app.get('/v1/compare', async (req, res) => {
         url: r.url,
         currency: 'USD',
         asin: r.asin,
-        seen_at: r.observed_at
+        seen_at: r.observed_at,
+        notes: r.notes || null
       }))
     });
   } catch (err) {

@@ -441,7 +441,16 @@
         list = Array.isArray(resp?.results) ? resp.results.slice() : [];
 
         // Always include current store card
-        list.push({ store: D.store, product_name: snap.title, price_cents: snap.price_cents, url: location.href });
+        const alreadySelf = list.some(p => {
+          const s1 = (p.store || "").toLowerCase();
+          const s2 = (D.store || "").toLowerCase();
+          const skuMatches = normalizeStoreKey(D.store, p.store_sku || "") === (snap.store_key || "");
+          const urlMatches = p.url && p.url.split("?")[0] === location.href.split("?")[0];
+          return s1 === s2 && (skuMatches || urlMatches);
+        });
+        if (!alreadySelf) {
+          list.push({ store: D.store, product_name: snap.title, price_cents: snap.price_cents, url: location.href, notes: null  });
+        }
 
         // If ASIN resolved but no Amazon row came back, add a DP link with N/A price
         const hasAmazon = list.some(p => (p.store || "").toLowerCase() === "amazon");
@@ -485,20 +494,22 @@
         if (p.url) { item.target = "_blank"; item.rel = "noopener noreferrer"; }
         else item.addEventListener("click", (e) => e.preventDefault());
 
-        const price = p.price_cents != null ? (p.price_cents / 100).toFixed(2) : "N/A";
+        const price = Number.isFinite(p.price_cents) ? (p.price_cents / 100).toFixed(2) : "";
         const storeKey = (p.store || "default").toLowerCase();
         const storeIcon = ICON(storeKey);
         const isBest = p.price_cents === bestPrice;
+        const noteHtml = p.notes ? `<div class="store-note">${p.notes}</div>` : "";
 
         item.innerHTML = `
           <div class="store-info">
             <img src="${storeIcon}" alt="${p.store || "Store"} logo" class="store-logo">
             <div class="store-and-product">
               <span class="store-name">${p.store || "Unknown"}</span>
+              ${noteHtml}
             </div>
           </div>
           <div class="price-info">
-            <span class="price">$${price}</span>
+            <span class="price">${price ? `$${price}` : ""}</span>
             ${isBest && storeKey !== "amazon" ? `<span class="savings-tag best-price">Best Price</span>` : ""}
           </div>
         `;
