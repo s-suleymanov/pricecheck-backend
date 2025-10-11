@@ -489,6 +489,9 @@
         const storeKey = (p.store || "default").toLowerCase();
         const storeIcon = ICON(storeKey);
         const isBest = p.price_cents === bestPrice;
+        const noteHtml = (p.notes && String(p.notes).trim())
+        ? `<div class="listing-note">${clean(p.notes)}</div>`
+        : '';
 
         item.innerHTML = `
           <div class="store-info">

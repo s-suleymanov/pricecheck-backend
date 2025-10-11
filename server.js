@@ -43,33 +43,92 @@ function normalizeStoreKey(store, key) {
 //  /v1/resolve
 //  Resolve ASIN from store + store_key using listings → asins
 // =====================
-app.get('/v1/resolve', async (req, res) => {
-  const store = String(req.query.store || '').trim();
-  const keyRaw = String(req.query.store_key || '').trim();
-  const key = normalizeStoreKey(store, keyRaw);
-  if (!store || !key) return res.json({ asin: null });
+app.get('/v1/compare', async (req, res) => {
+  const asin = String(req.query.asin || '').trim().toUpperCase();
+  if (!asin || !/^[A-Z0-9]{10}$/.test(asin)) return res.json({ results: [] });
 
   try {
-    const q = `
-      SELECT a.asin
-      FROM public.listings l
-      JOIN public.asins a ON a.id = l.variant_id
-      WHERE lower(trim(l.store)) = lower(trim($1))
-        AND (
-          trim(l.store_sku) = $2
-          OR trim(regexp_replace(l.store_sku, '^[Aa][- ]?', '', 'i')) = $2
-        )
-      ORDER BY COALESCE(l.current_price_observed_at, l.observed_at) DESC NULLS LAST, l.id DESC
-      LIMIT 1
+    const sql = `
+      WITH variant_row AS (
+        SELECT
+          a.id AS variant_id,
+          a.asin,
+          p.title AS product_title,
+          a.variant_label
+        FROM public.asins a
+        LEFT JOIN public.products p ON p.id = a.product_id
+        WHERE upper(a.asin) = $1
+      ),
+      latest_listings AS (
+        -- latest one per store for this ASIN
+        SELECT DISTINCT ON (l.store)
+          l.store,
+          l.store_sku,
+          l.url,
+          l.price_cents,
+          l.observed_at,
+          l.notes
+        FROM public.listings l
+        JOIN public.asins a ON a.id = l.variant_id
+        WHERE upper(a.asin) = $1
+        ORDER BY l.store, l.observed_at DESC NULLS LAST, l.id DESC
+      ),
+      amazon_note AS (
+        SELECT l.notes
+        FROM public.listings l
+        JOIN public.asins a ON a.id = l.variant_id
+        WHERE lower(l.store) = 'amazon' AND upper(a.asin) = $1 AND l.notes IS NOT NULL
+        ORDER BY l.observed_at DESC NULLS LAST, l.id DESC
+        LIMIT 1
+      )
+      -- Amazon row (no price yet, just title/notes)
+      SELECT
+        'Amazon'::text AS store,
+        (SELECT asin FROM variant_row LIMIT 1) AS asin,
+        NULL::text AS store_sku,
+        NULL::int AS price_cents,
+        NULL::timestamptz AS observed_at,
+        NULL::text AS url,
+        COALESCE((SELECT product_title FROM variant_row LIMIT 1), '') AS title,
+        (SELECT notes FROM amazon_note) AS notes
+
+      UNION ALL
+
+      -- Other stores
+      SELECT
+        ll.store,
+        $1 AS asin,
+        ll.store_sku,
+        ll.price_cents,
+        ll.observed_at,
+        ll.url,
+        NULL::text AS title,
+        ll.notes
+      FROM latest_listings ll
+
+      ORDER BY price_cents ASC NULLS LAST, store ASC;
     `;
-    const r = await pool.query(q, [store, key]);
-    const asin = r.rows[0]?.asin ? String(r.rows[0].asin).toUpperCase() : null;
-    return res.json({ asin });
-  } catch (e) {
-    console.error('resolve error:', e);
-    return res.json({ asin: null });
+
+    const { rows } = await pool.query(sql, [asin]);
+
+    res.json({
+      results: rows.map(r => ({
+        store: r.store,
+        product_name: r.title,   // Amazon row has title; others usually null
+        price_cents: r.price_cents,
+        url: r.url,
+        currency: 'USD',
+        asin: r.asin,
+        seen_at: r.observed_at,
+        notes: r.notes || null
+      }))
+    });
+  } catch (err) {
+    console.error('compare error:', err);
+    res.status(500).json({ results: [] });
   }
 });
+
 
 // =====================
 //  /v1/compare
@@ -163,25 +222,6 @@ app.get('/v1/compare', async (req, res) => {
   } catch (err) {
     console.error('compare error:', err);
     res.status(500).json({ results: [] });
-  }
-});
-
-// =====================
-//  Debug helpers
-// =====================
-app.get('/debug/whoami', async (_req, res) => {
-  try {
-    const r = await pool.query(`
-      SELECT
-        current_database() AS db,
-        current_user AS user,
-        current_setting('server_version') AS version,
-        current_setting('TimeZone') AS tz,
-        current_setting('search_path') AS search_path
-    `);
-    res.json({ ok: true, info: r.rows[0] });
-  } catch (e) {
-    res.json({ ok: false, error: String(e) });
   }
 });
 
