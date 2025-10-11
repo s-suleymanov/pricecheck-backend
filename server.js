@@ -32,26 +32,24 @@ function normalizeStoreKey(store, key) {
   return k;
 }
 
-// tolerant resolver
+// replace the /v1/resolve handler body with this
 app.get('/v1/resolve', async (req, res) => {
   const store = String(req.query.store || '').trim();
   const keyRaw = String(req.query.store_key || '').trim();
   const key = normalizeStoreKey(store, keyRaw);
   if (!store || !key) return res.json({ asin: null });
 
-  console.log('resolve req', { store, keyRaw, normalized: key });
-
   try {
     const q = `
-      SELECT asin
-      FROM public.price_feed
-      WHERE lower(trim(store)) = lower(trim($1))
+      SELECT a.asin
+      FROM public.listings l
+      JOIN public.asins a ON a.id = l.variant_id
+      WHERE lower(trim(l.store)) = lower(trim($1))
         AND (
-          trim(store_sku) = $2
-          OR trim(regexp_replace(store_sku, '^[Aa][- ]?', '', 'i')) = $2
+          trim(l.store_sku) = $2
+          OR trim(regexp_replace(l.store_sku, '^[Aa][- ]?', '', 'i')) = $2
         )
-        AND asin IS NOT NULL
-      ORDER BY observed_at DESC NULLS LAST
+      ORDER BY l.current_price_observed_at DESC NULLS LAST, l.id DESC
       LIMIT 1
     `;
     const r = await pool.query(q, [store, key]);
@@ -63,30 +61,51 @@ app.get('/v1/resolve', async (req, res) => {
   }
 });
 
-// compare route (unchanged if you already have it)
+// replace the /v1/compare handler body with this
 app.get('/v1/compare', async (req, res) => {
   const asin = String(req.query.asin || '').trim().toUpperCase();
   if (!asin || !/^[A-Z0-9]{10}$/.test(asin)) return res.json({ results: [] });
+
   try {
-    const { rows } = await pool.query(
-      `
-      WITH latest AS (
-        SELECT DISTINCT ON (store)
-          store, asin, url, COALESCE(title,'') AS title, price_cents, observed_at
-        FROM public.price_feed
-        WHERE asin = $1
-        ORDER BY store, observed_at DESC
+    const sql = `
+      WITH the_variant AS (
+        SELECT a.id AS variant_id, a.asin, p.title AS product_title, a.variant_label,
+               a.current_price_cents AS amazon_price_cents,
+               a.current_price_observed_at AS amazon_observed_at
+        FROM public.asins a
+        JOIN public.products p ON p.id = a.product_id
+        WHERE upper(a.asin) = $1
+      ),
+      other_stores AS (
+        SELECT l.store, l.store_sku, l.url,
+               l.current_price_cents AS price_cents,
+               l.current_price_observed_at AS observed_at
+        FROM public.listings l
+        JOIN the_variant v ON v.variant_id = l.variant_id
       )
-      SELECT store, asin, url, title, price_cents, observed_at
-      FROM latest
-      ORDER BY price_cents ASC NULLS LAST, store ASC
-      `,
-      [asin]
-    );
+      SELECT
+        'Amazon'::text AS store,
+        v.asin,
+        NULL::text AS store_sku,
+        NULLIF(v.amazon_price_cents, NULL) AS price_cents,
+        v.amazon_observed_at AS observed_at,
+        NULL::text AS url,
+        COALESCE(v.product_title, '') AS title
+      FROM the_variant v
+      UNION ALL
+      SELECT
+        o.store, (SELECT asin FROM the_variant), o.store_sku, o.price_cents, o.observed_at, o.url,
+        NULL::text AS title
+      FROM other_stores o
+      ORDER BY price_cents ASC NULLS LAST, store ASC;
+    `;
+
+    const { rows } = await pool.query(sql, [asin]);
+
     res.json({
       results: rows.map(r => ({
         store: r.store,
-        product_name: r.title,
+        product_name: r.title,         // Amazon row has product title, others usually do not
         price_cents: r.price_cents,
         url: r.url,
         currency: 'USD',
