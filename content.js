@@ -409,10 +409,16 @@
       await safeSet({ lastSnapshot: snap });
 
       const variantEl = sh.querySelector('#ps-variant-val');
+      let fromDB = null;
+
+      if (typeof resp !== 'undefined' && resp?.results) {
+        fromDB = resp.results.find(r => r.variant_label)?.variant_label || null;
+      }
+
       if (variantEl) {
-        const fromDB = resp?.results?.find(r => r.variant_label)?.variant_label;
         variantEl.textContent = (fromDB || snap.variant_label || '').trim() || '—';
       }
+
       const asinEl = sh.querySelector('#ps-asin-val');
       asinEl && (asinEl.textContent = snap.asin || (site === 'amazon' ? 'Not found' : 'Resolving...'));
 
