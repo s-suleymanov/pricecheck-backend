@@ -391,7 +391,7 @@
       }
     },
 
-    async populate() {
+       async populate() {
       if (!this.shadow) return;
       const sh = this.shadow;
       const $ = (sel) => sh.querySelector(sel);
@@ -404,7 +404,7 @@
         asin: D.getASIN ? D.getASIN() : null,
         price_cents: D.getPriceCents ? D.getPriceCents() : null,
         store_key: D.getStoreKey ? D.getStoreKey() : null,
-          variant_label: D.getVariantLabel ? D.getVariantLabel() : null
+        variant_label: D.getVariantLabel ? D.getVariantLabel() : null
       };
       await safeSet({ lastSnapshot: snap });
 
@@ -412,6 +412,17 @@
       const asinEl = sh.querySelector('#ps-asin-val');
       asinEl && (asinEl.textContent = snap.asin || (site === 'amazon' ? 'Not found' : 'Resolving...'));
 
+      // New: send observation to backend (records into price_history)
+      // Only if we have a price to record
+      if (Number.isFinite(snap.price_cents)) {
+        const payload =
+          site === 'amazon'
+            ? { store: 'Amazon', asin: snap.asin || null, price_cents: snap.price_cents, url: location.href, title: snap.title }
+            : { store: D.store, store_sku: snap.store_key || null, price_cents: snap.price_cents, url: location.href, title: snap.title };
+
+        // Fire and forget; backend validates keys
+        try { await safeSend({ type: 'OBSERVE_PRICE', payload }); } catch {}
+      }
 
       const resultsEl = $("#ps-results");
       if (!resultsEl) return;
@@ -452,7 +463,6 @@
           list.push({ store: D.store, product_name: snap.title, price_cents: snap.price_cents, url: location.href, notes: null  });
         }
 
-        // If ASIN resolved but no Amazon row came back, add a DP link with N/A price
         const hasAmazon = list.some(p => (p.store || "").toLowerCase() === "amazon");
         if (resolvedASIN && !hasAmazon) {
           list.push({
@@ -463,7 +473,6 @@
           });
         }
 
-        // If no ASIN resolved, add an Amazon search card - prefer product name
         if (!resolvedASIN) {
           const q = snap.title || snap.store_key || "";
           list.push({
@@ -518,6 +527,7 @@
         resultsEl.appendChild(item);
       }
     },
+
 
     async openSidebar() { await this.ensure(); this.open = true; this.applyPagePush(); await this.populate(); },
     close() { if (!this.root) return; this.open = false; this.applyPagePush(); },
