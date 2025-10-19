@@ -409,15 +409,21 @@
       await safeSet({ lastSnapshot: snap });
 
       const variantEl = sh.querySelector('#ps-variant-val');
-      let fromDB = null;
-
-      if (typeof resp !== 'undefined' && resp?.results) {
-        fromDB = resp.results.find(r => r.variant_label)?.variant_label || null;
-      }
-
       if (variantEl) {
-        variantEl.textContent = (fromDB || snap.variant_label || '').trim() || '—';
+        // Always recompute from the page every time populate() runs
+        const freshVariant = D.getVariantLabel ? D.getVariantLabel() : '';
+        let dbVariant = null;
+
+        // If we have DB results (e.g., from /compare)
+        if (typeof resp !== 'undefined' && resp?.results?.length) {
+          dbVariant = resp.results.find(r => r.variant_label)?.variant_label || null;
+        }
+
+        // Prioritize live DOM label > DB label > cached snapshot
+        variantEl.textContent =
+          (freshVariant || dbVariant || snap.variant_label || '—').trim();
       }
+
 
       const asinEl = sh.querySelector('#ps-asin-val');
       asinEl && (asinEl.textContent = snap.asin || (site === 'amazon' ? 'Not found' : 'Resolving...'));
@@ -579,7 +585,7 @@
 
       const root = document.getElementById("dp-container") || document.body;
       this._mo = new MutationObserver(debounced);
-      this._mo.observe(root, { subtree: true, childList: true });
+      this._mo.observe(root, { subtree: true, childList: true, attributes: true });
 
       debounced();
     },
