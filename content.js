@@ -408,7 +408,10 @@
       };
       await safeSet({ lastSnapshot: snap });
 
-      sh.querySelector('#ps-variant-val').textContent = (snap.variant_label || '').trim?.() || '';
+      const variantEl = sh.querySelector('#ps-variant-val');
+        if (variantEl) {
+          variantEl.textContent = (snap.variant_label || '').trim?.() || '';
+        }
       const asinEl = sh.querySelector('#ps-asin-val');
       asinEl && (asinEl.textContent = snap.asin || (site === 'amazon' ? 'Not found' : 'Resolving...'));
 
