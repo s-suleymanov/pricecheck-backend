@@ -409,9 +409,10 @@
       await safeSet({ lastSnapshot: snap });
 
       const variantEl = sh.querySelector('#ps-variant-val');
-        if (variantEl) {
-          variantEl.textContent = (snap.variant_label || '').trim?.() || '';
-        }
+      if (variantEl) {
+        const fromDB = resp?.results?.find(r => r.variant_label)?.variant_label;
+        variantEl.textContent = (fromDB || snap.variant_label || '').trim() || '—';
+      }
       const asinEl = sh.querySelector('#ps-asin-val');
       asinEl && (asinEl.textContent = snap.asin || (site === 'amazon' ? 'Not found' : 'Resolving...'));
 
@@ -510,7 +511,8 @@
         const storeKey = (p.store || "default").toLowerCase();
         const storeIcon = ICON(storeKey);
         const isBest = p.price_cents === bestPrice;
-        const noteHtml = p.notes ? `<div class="store-note">${p.notes}</div>` : "";
+        const details = [p.brand, p.category, p.variant_label].filter(Boolean).join(' · ');
+        const noteHtml = details ? `<div class="store-note">${details}</div>` : '';
 
         item.innerHTML = `
           <div class="store-info">

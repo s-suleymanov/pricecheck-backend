@@ -75,12 +75,14 @@ app.get('/v1/compare', async (req, res) => {
   try {
     const sql = `
       WITH the_variant AS (
-        SELECT a.asin,
-               a.id AS asin_row_id,
-               a.variant_label,
-               a.current_price_cents  AS amazon_price_cents,
-               a.current_price_observed_at AS amazon_observed_at,
-               p.title AS product_title
+      SELECT a.asin,
+            a.id AS asin_row_id,
+            a.variant_label,
+            a.current_price_cents  AS amazon_price_cents,
+            a.current_price_observed_at AS amazon_observed_at,
+            p.title AS product_title,
+            p.brand,
+            p.category
         FROM public.asins a
         JOIN public.products p ON p.id = a.product_id
         WHERE upper(a.asin) = $1
@@ -102,8 +104,12 @@ app.get('/v1/compare', async (req, res) => {
         v.amazon_observed_at AS observed_at,
         NULL::text AS url,
         v.product_title AS title,
+        v.brand,
+        v.category,
+        v.variant_label,
         NULL::text AS notes
       FROM the_variant v
+      WHERE v.amazon_price_cents IS NOT NULL
       UNION ALL
       SELECT
         o.store,
@@ -119,18 +125,21 @@ app.get('/v1/compare', async (req, res) => {
     `;
     const { rows } = await pool.query(sql, [asin]);
 
-    res.json({
-      results: rows.map(r => ({
-        store: r.store,
-        product_name: r.title || '',
-        price_cents: r.price_cents,
-        url: r.url,
-        currency: 'USD',
-        asin: r.asin,
-        store_sku: r.store_sku,
-        seen_at: r.observed_at
-      }))
-    });
+   res.json({
+  results: rows.map(r => ({
+    store: r.store,
+    product_name: r.title || '',
+    price_cents: r.price_cents,
+    url: r.url,
+    currency: 'USD',
+    asin: r.asin,
+    store_sku: r.store_sku,
+    seen_at: r.observed_at,
+    brand: r.brand || null,
+    category: r.category || null,
+    variant_label: r.variant_label || null
+  }))
+});
   } catch (err) {
     console.error('compare error:', err);
     res.status(500).json({ results: [] });
