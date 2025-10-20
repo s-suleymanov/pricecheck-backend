@@ -4,7 +4,7 @@ const { Pool } = require('pg');
 
 const app = express();
 
-// basic config
+// JSON and CORS
 app.use(express.json({ limit: '256kb' }));
 app.use((req, res, next) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -15,12 +15,13 @@ app.use((req, res, next) => {
   next();
 });
 
+// DB
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false }
 });
 
-// utils
+// Utils
 function normalizeStoreKey(store, key) {
   if (!key) return '';
   const s = String(store || '').toLowerCase();
@@ -34,16 +35,17 @@ function normalizeStoreKey(store, key) {
   return k;
 }
 
-// health
-app.get('/health', (_req, res) => res.json({ ok: true, version: 'v10-upc-first' }));
+// Health
+app.get('/health', (_req, res) => res.json({ ok: true, version: 'v11-upc-first-clean' }));
 
 /*
-  GET /v1/resolve?store=Target&store_key=TCIN_or_SKU
+  GET /v1/resolve?store=Target&store_key=12345
   Returns { asin: "B0..." | null }
+
   Logic:
-    1) Find the listing (store, store_sku)
-    2) If listing.upc exists, map to asins.asin by upc
-    3) Else if listing.asin exists, use that
+  1) Find listing by (store, store_sku)
+  2) If listing.upc exists, map to asins.asin via upc
+  3) Else if listing.asin exists, return that
 */
 app.get('/v1/resolve', async (req, res) => {
   const store = String(req.query.store || '').trim();
@@ -52,21 +54,24 @@ app.get('/v1/resolve', async (req, res) => {
   if (!store || !key) return res.json({ asin: null });
 
   try {
-    const qListing = `
-      SELECT l.asin, l.upc
-      FROM public.listings l
-      WHERE lower(btrim(l.store)) = lower(btrim($1))
-        AND btrim(l.store_sku) = $2
-      ORDER BY l.current_price_observed_at DESC NULLS LAST, l.id DESC
-      LIMIT 1
-    `;
-    const rL = await pool.query(qListing, [store, key]);
+    const rL = await pool.query(
+      `SELECT l.asin, l.upc
+       FROM public.listings l
+       WHERE lower(btrim(l.store)) = lower(btrim($1))
+         AND btrim(l.store_sku) = $2
+       ORDER BY l.current_price_observed_at DESC NULLS LAST, l.id DESC
+       LIMIT 1`,
+      [store, key]
+    );
     const l = rL.rows[0];
     if (!l) return res.json({ asin: null });
 
     if (l.upc) {
       const rA = await pool.query(
-        `SELECT asin FROM public.asins WHERE upc = $1 AND asin IS NOT NULL LIMIT 1`,
+        `SELECT asin
+           FROM public.asins
+          WHERE upc = $1 AND asin IS NOT NULL
+          LIMIT 1`,
         [l.upc]
       );
       if (rA.rows[0]?.asin) {
@@ -86,11 +91,12 @@ app.get('/v1/resolve', async (req, res) => {
 /*
   GET /v1/compare?asin=B0XXXXXXXX
   Returns { results: [...] }
+
   Logic:
-    - Pull the input ASIN row from asins, including its UPC
-    - Prefer joining listings by UPC
-    - If UPC yields nothing, fall back to joining listings by ASIN
-    - Include Amazon price row if present on asins
+  - Load ASIN row from asins, include UPC and product info
+  - Prefer joining listings by UPC
+  - If no UPC match, fall back to joining listings by ASIN
+  - Include Amazon price row if available
 */
 app.get('/v1/compare', async (req, res) => {
   const asin = String(req.query.asin || '').trim().toUpperCase();
@@ -117,7 +123,7 @@ app.get('/v1/compare', async (req, res) => {
         SELECT l.store, l.store_sku, l.url,
                l.current_price_cents AS price_cents,
                l.current_price_observed_at AS observed_at,
-               l.title, l.status, l.upc
+               l.status, l.upc
           FROM public.listings l
           JOIN input_variant v ON v.upc IS NOT NULL AND l.upc = v.upc
       ),
@@ -125,7 +131,7 @@ app.get('/v1/compare', async (req, res) => {
         SELECT l.store, l.store_sku, l.url,
                l.current_price_cents AS price_cents,
                l.current_price_observed_at AS observed_at,
-               l.title, l.status, l.upc
+               l.status, l.upc
           FROM public.listings l
           JOIN input_variant v ON l.asin = v.asin
       ),
@@ -158,7 +164,7 @@ app.get('/v1/compare', async (req, res) => {
         o.price_cents,
         o.observed_at,
         o.url,
-        COALESCE(o.title, (SELECT product_title FROM input_variant)),
+        (SELECT product_title FROM input_variant) AS title,
         NULL::text AS brand,
         NULL::text AS category,
         NULL::text AS variant_label
@@ -193,10 +199,12 @@ app.get('/v1/compare', async (req, res) => {
 /*
   POST /v1/observe
   Body: { store, asin?, store_sku?, price_cents, url?, title?, observed_at? }
+
   Behavior:
-    - Ensures holder row exists (asins for Amazon, listings for others)
-    - Inserts into price_history
-    - Trigger updates current_price_* on holder
+  - Ensure asins row exists for Amazon
+  - Ensure listings row exists for non Amazon
+  - Insert into price_history
+  - DB trigger updates current_price_* on holders
 */
 app.post('/v1/observe', async (req, res) => {
   const { store, asin, store_sku, price_cents, url, title, observed_at } = req.body || {};
@@ -235,12 +243,13 @@ app.post('/v1/observe', async (req, res) => {
     } else {
       if (!skuNorm) throw new Error('store_sku required for non Amazon stores');
 
+      // listings table has no title column in your schema
       await client.query(
-        `INSERT INTO public.listings (store, store_sku, url, title, status)
-         VALUES ($1, $2, $3, $4, 'active')
+        `INSERT INTO public.listings (store, store_sku, url, status)
+         VALUES ($1, $2, $3, 'active')
          ON CONFLICT (store, store_sku)
-         DO UPDATE SET url = EXCLUDED.url, title = EXCLUDED.title`,
-        [storeNorm, skuNorm, url || null, title || null]
+         DO UPDATE SET url = EXCLUDED.url`,
+        [storeNorm, skuNorm, url || null]
       );
 
       await client.query(
@@ -261,8 +270,10 @@ app.post('/v1/observe', async (req, res) => {
   }
 });
 
-// start and shutdown
+// Start
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, '0.0.0.0', () => console.log(`API listening on ${PORT}`));
+
+// Graceful shutdown
 process.on('SIGINT', async () => { try { await pool.end(); } finally { process.exit(0); } });
 process.on('SIGTERM', async () => { try { await pool.end(); } finally { process.exit(0); } });
