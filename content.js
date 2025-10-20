@@ -37,10 +37,10 @@
     const s = String(store || "").toLowerCase();
     let k = String(key || "").trim();
     if (s === "target") {
-      k = k.replace(/^A[-\s]?/i, "");   // A-12345678 -> 12345678
-      k = k.replace(/[^0-9A-Z]/g, "");  // keep digits/letters
+      k = k.replace(/^A[-\s]?/i, "");
+      k = k.replace(/[^0-9A-Z]/g, "");
     } else if (s === "walmart" || s === "bestbuy") {
-      k = k.replace(/\D+/g, "");        // digits only
+      k = k.replace(/\D+/g, "");
     }
     return k;
   }
@@ -62,99 +62,132 @@
         );
       },
       getVariantLabel() {
-  // 1) Try DOM-first (covers old + new twister UIs)
-  const pieces = [];
-  const domSelectors = [
-    // new button-style twister
-    '#twister .a-button-selected .a-button-text',
-    '#inline-twister-expander-content .a-button-selected .a-button-text',
-    // classic "selection" line
-    '#variation_color_name .selection',
-    '#variation_size_name .selection',
-    '#variation_style_name .selection',
-    '#variation_configuration .selection',
-    '#variation_pattern_name .selection'
-  ];
-  for (const sel of domSelectors) {
-    const el = document.querySelector(sel);
-    const t = el && el.textContent && el.textContent.trim();
-    if (t && !/^(Select|Choose)$/i.test(t) && !pieces.includes(t)) pieces.push(t);
-  }
-  if (pieces.length) return pieces.join(' ');
+        const cleanTxt = (t) => String(t || "")
+          .replace(/\s+/g, " ")
+          .replace(/^\s*(Select|Choose)\b.*$/i, "")
+          .trim();
 
-  // 2) Fallback: parse page scripts for variationValues + selectedVariationValues
-  function tryParseWholeJSON(text) {
-    const t = (text || '').trim();
-    if ((t.startsWith('{') && t.endsWith('}')) || (t.startsWith('[') && t.endsWith(']'))) {
-      try { return JSON.parse(t); } catch { return null; }
-    }
-    return null;
-  }
-  function extractObjectForKey(text, key) {
-    const idx = text.indexOf(key);
-    if (idx === -1) return null;
-    let i = text.indexOf('{', idx);
-    if (i === -1) return null;
-    let depth = 0, start = i, end = -1, inStr = false, esc = false;
-    for (; i < text.length; i++) {
-      const ch = text[i];
-      if (inStr) {
-        if (esc) esc = false;
-        else if (ch === '\\') esc = true;
-        else if (ch === '"') inStr = false;
-      } else {
-        if (ch === '"') inStr = true;
-        else if (ch === '{') depth++;
-        else if (ch === '}') { depth--; if (depth === 0) { end = i; break; } }
-      }
-    }
-    if (start >= 0 && end > start) {
-      try { return JSON.parse(text.slice(start, end + 1)); } catch { return null; }
-    }
-    return null;
-  }
+        const picks = new Set();
 
-  let variationValues = null;
-  let selectedVariationValues = null;
+        const btnSelectors = [
+          "#twister .a-button-selected .a-button-text",
+          "#inline-twister-expander-content .a-button-selected .a-button-text",
+          "#twister [aria-pressed='true'] .a-button-text",
+          "#twister [aria-checked='true'] .a-button-text",
+          "#twister .a-button-toggle[aria-pressed='true'] .a-button-text",
+          "#twister .a-button-toggle.a-button-selected .a-button-text",
+          "#twister .a-button-toggle[aria-pressed='true']",
+          "#twister .a-button-selected",
+          "#variation_color_name .selection",
+          "#variation_size_name .selection",
+          "#variation_style_name .selection",
+          "#variation_configuration .selection",
+          "#variation_pattern_name .selection",
+          "#twister .a-dropdown-prompt"
+        ];
+        for (const sel of btnSelectors) {
+          document.querySelectorAll(sel).forEach((el) => {
+            const t = cleanTxt(el.getAttribute?.("aria-label") || el.textContent);
+            if (t) picks.add(t);
+          });
+        }
 
-  for (const sc of document.querySelectorAll('script')) {
-    const text = sc.textContent || '';
-    if (!variationValues && text.includes('"variationValues"')) {
-      const whole = tryParseWholeJSON(text);
-      if (whole?.variationValues && typeof whole.variationValues === 'object') {
-        variationValues = whole.variationValues;
-      } else {
-        const obj = extractObjectForKey(text, '"variationValues"');
-        if (obj && typeof obj === 'object') variationValues = obj;
-      }
-    }
-    if (!selectedVariationValues && text.includes('"selectedVariationValues"')) {
-      const whole = tryParseWholeJSON(text);
-      if (whole?.selectedVariationValues && typeof whole.selectedVariationValues === 'object') {
-        selectedVariationValues = whole.selectedVariationValues;
-      } else {
-        const obj = extractObjectForKey(text, '"selectedVariationValues"');
-        if (obj && typeof obj === 'object') selectedVariationValues = obj;
-      }
-    }
-    if (variationValues && selectedVariationValues) break;
-  }
+        const poRows = document.querySelectorAll("#poExpander, #poExpander_content, #poExpanderContainer");
+        poRows.forEach((root) => {
+          root.querySelectorAll(".po-attribute, [data-feature-name], .po-break-word").forEach((row) => {
+            const t = cleanTxt(row.textContent);
+            if (t && !/^about this item$/i.test(t)) {
+              const val = t.includes(":") ? cleanTxt(t.split(":").slice(1).join(":")) : t;
+              if (val) picks.add(val);
+            }
+          });
+        });
 
-  if (variationValues && selectedVariationValues) {
-    const out = [];
-    for (const dim of Object.keys(variationValues)) {
-      const arr = variationValues[dim];
-      const idx = parseInt(selectedVariationValues[dim], 10);
-      if (Array.isArray(arr) && arr.length > 1 && Number.isFinite(idx)) {
-        const val = String(arr[idx] ?? '').trim();
-        if (val && !/^(Select|Choose)$/i.test(val)) out.push(val);
-      }
-    }
-    if (out.length) return out.join(' ');
-  }
+        const inlineVals = document.querySelectorAll(
+          "#inline-twister-expander-content [data-testid='inline-twister-dim-values'], " +
+          "#inline-twister-expander-content [data-testid='inline-twister-value'], " +
+          "#twister [data-testid='inline-twister-value']"
+        );
+        inlineVals.forEach((el) => {
+          const t = cleanTxt(el.textContent);
+          if (t) picks.add(t);
+        });
 
-  return '';
-},
+        const domOut = Array.from(picks).filter(Boolean);
+        if (domOut.length) return domOut.join(" ");
+
+        function tryParseWholeJSON(text) {
+          const s = (text || "").trim();
+          if ((s.startsWith("{") && s.endsWith("}")) || (s.startsWith("[") && s.endsWith("]"))) {
+            try { return JSON.parse(s); } catch { return null; }
+          }
+          return null;
+        }
+        function extractObjectForKey(text, key) {
+          const idx = text.indexOf(key);
+          if (idx === -1) return null;
+          let i = text.indexOf("{", idx);
+          if (i === -1) return null;
+          let depth = 0, start = i, end = -1, inStr = false, esc = false;
+          for (; i < text.length; i++) {
+            const ch = text[i];
+            if (inStr) {
+              if (esc) esc = false;
+              else if (ch === "\\") esc = true;
+              else if (ch === '"') inStr = false;
+            } else {
+              if (ch === '"') inStr = true;
+              else if (ch === "{") depth++;
+              else if (ch === "}") { depth--; if (depth === 0) { end = i; break; } }
+            }
+          }
+          if (start >= 0 && end > start) {
+            try { return JSON.parse(text.slice(start, end + 1)); } catch { return null; }
+          }
+          return null;
+        }
+
+        let variationValues = null;
+        let selectedVariationValues = null;
+
+        for (const sc of document.querySelectorAll("script")) {
+          const text = sc.textContent || "";
+          if (!variationValues && text.includes('"variationValues"')) {
+            const whole = tryParseWholeJSON(text);
+            if (whole?.variationValues && typeof whole.variationValues === "object") {
+              variationValues = whole.variationValues;
+            } else {
+              const obj = extractObjectForKey(text, '"variationValues"');
+              if (obj && typeof obj === "object") variationValues = obj;
+            }
+          }
+          if (!selectedVariationValues && text.includes('"selectedVariationValues"')) {
+            const whole = tryParseWholeJSON(text);
+            if (whole?.selectedVariationValues && typeof whole.selectedVariationValues === "object") {
+              selectedVariationValues = whole.selectedVariationValues;
+            } else {
+              const obj = extractObjectForKey(text, '"selectedVariationValues"');
+              if (obj && typeof obj === "object") selectedVariationValues = obj;
+            }
+          }
+          if (variationValues && selectedVariationValues) break;
+        }
+
+        if (variationValues && selectedVariationValues) {
+          const out = [];
+          for (const dim of Object.keys(variationValues)) {
+            const arr = variationValues[dim];
+            const idx = parseInt(selectedVariationValues[dim], 10);
+            if (Array.isArray(arr) && arr.length > 0 && Number.isFinite(idx)) {
+              const val = String(arr[idx] ?? "").trim();
+              if (val) out.push(val);
+            }
+          }
+          if (out.length) return out.join(" ");
+        }
+
+        return "";
+      },
       getPriceCents() {
         const sels = [
           "#corePrice_feature_div .a-offscreen",
@@ -204,14 +237,12 @@
       },
       getASIN() { return null; },
       getStoreKey() {
-        // Prefer TCIN, normalize to digits/letters only
         const mPath = location.pathname.match(/\/A-([0-9A-Z]+)/i)?.[1];
         const mMeta = document.querySelector('meta[name="twitter:app:url:iphone"]')?.content?.match(/\/A-([0-9A-Z]+)/i)?.[1];
         const mText = document.body.innerText.match(/\bTCIN\s*[:#]?\s*([0-9A-Z]{5,})/i)?.[1];
         const tcinRaw = mPath || mMeta || mText || null;
         if (tcinRaw) return normalizeStoreKey("Target", tcinRaw);
 
-        // Fallback UPC from ld+json or page text
         for (const s of document.querySelectorAll('script[type="application/ld+json"]')) {
           try {
             const j = JSON.parse(s.textContent.trim());
@@ -241,9 +272,12 @@
       getASIN() { return null; },
       getStoreKey() {
         const m = location.pathname.match(/\/ip\/[^/]+\/(\d+)/);
-        if (m) return normalizeStoreKey("Walmart", m[1]); // itemId
+        if (m) return normalizeStoreKey("Walmart", m[1]);
         for (const s of document.querySelectorAll('script[type="application/ld+json"]')) {
-          try { const j = JSON.parse(s.textContent.trim()); if (j?.sku) return normalizeStoreKey("Walmart", String(j.sku)); } catch {}
+          try {
+            const j = JSON.parse(s.textContent.trim());
+            if (j?.sku) return normalizeStoreKey("Walmart", String(j.sku));
+          } catch {}
         }
         const meta = document.querySelector('meta[property="product:retailer_item_id"]')?.content;
         if (meta) return normalizeStoreKey("Walmart", meta);
@@ -310,7 +344,6 @@
     _inflight: null,
 
     async ensure() {
-      // Kill accidental duplicates except the first
       const all = Array.from(document.querySelectorAll(`#${this.id}`));
       for (let i = 1; i < all.length; i++) all[i].remove();
 
@@ -345,15 +378,12 @@
       sh.appendChild(style);
       sh.appendChild(container);
 
-      // close button
       sh.querySelector("#ps-close")?.addEventListener("click", (e) => { e.preventDefault(); e.stopPropagation(); this.close(); });
-      // Esc to close
       window.addEventListener("keydown", (e) => { if (this.open && (e.key === "Escape" || e.key === "Esc")) this.close(); });
 
       const logoEl = sh.querySelector("#ps-logo");
       if (logoEl) logoEl.src = chrome.runtime.getURL("icons/logo.png");
 
-      // resizer
       let resizing = false;
       sh.querySelector("#ps-resize")?.addEventListener("mousedown", (e) => {
         e.preventDefault();
@@ -391,7 +421,7 @@
       }
     },
 
-       async populate() {
+    async populate() {
       if (!this.shadow) return;
       const sh = this.shadow;
       const $ = (sel) => sh.querySelector(sel);
@@ -408,36 +438,21 @@
       };
       await safeSet({ lastSnapshot: snap });
 
-      const variantEl = sh.querySelector('#ps-variant-val');
+      const variantEl = sh.querySelector("#ps-variant-val");
       if (variantEl) {
-        // Always recompute from the page every time populate() runs
-        const freshVariant = D.getVariantLabel ? D.getVariantLabel() : '';
-        let dbVariant = null;
-
-        // If we have DB results (e.g., from /compare)
-        if (typeof resp !== 'undefined' && resp?.results?.length) {
-          dbVariant = resp.results.find(r => r.variant_label)?.variant_label || null;
-        }
-
-        // Prioritize live DOM label > DB label > cached snapshot
-        variantEl.textContent =
-          (freshVariant || dbVariant || snap.variant_label || '—').trim();
+        const freshVariant = D.getVariantLabel ? D.getVariantLabel() : "";
+        variantEl.textContent = (freshVariant || snap.variant_label || "").trim() || "—";
       }
 
+      const asinEl = sh.querySelector("#ps-asin-val");
+      asinEl && (asinEl.textContent = snap.asin || (site === "amazon" ? "Not found" : "Resolving..."));
 
-      const asinEl = sh.querySelector('#ps-asin-val');
-      asinEl && (asinEl.textContent = snap.asin || (site === 'amazon' ? 'Not found' : 'Resolving...'));
-
-      // New: send observation to backend (records into price_history)
-      // Only if we have a price to record
       if (Number.isFinite(snap.price_cents)) {
         const payload =
-          site === 'amazon'
-            ? { store: 'Amazon', asin: snap.asin || null, price_cents: snap.price_cents, url: location.href, title: snap.title }
+          site === "amazon"
+            ? { store: "Amazon", asin: snap.asin || null, price_cents: snap.price_cents, url: location.href, title: snap.title }
             : { store: D.store, store_sku: snap.store_key || null, price_cents: snap.price_cents, url: location.href, title: snap.title };
-
-        // Fire and forget; backend validates keys
-        try { await safeSend({ type: 'OBSERVE_PRICE', payload }); } catch {}
+        try { await safeSend({ type: "OBSERVE_PRICE", payload }); } catch {}
       }
 
       const resultsEl = $("#ps-results");
@@ -451,12 +466,11 @@
         const resp = await safeSend({ type: "COMPARE_REQUEST", payload: { asin: snap.asin } });
         list = Array.isArray(resp?.results) ? resp.results.slice() : [];
 
-        const hasAmazon = list.some(p => (p.store || "").toLowerCase() === "amazon");
+        const hasAmazon = list.some((p) => (p.store || "").toLowerCase() === "amazon");
         if (!hasAmazon) {
           list.push({ store: "Amazon", product_name: snap.title, price_cents: snap.price_cents, url: location.href });
         }
       } else {
-        // Non Amazon - resolve by store_sku
         const resp = await safeSend({
           type: "RESOLVE_COMPARE_REQUEST",
           payload: { store: D.store, store_key: snap.store_key || "", title: snap.title }
@@ -467,8 +481,7 @@
 
         list = Array.isArray(resp?.results) ? resp.results.slice() : [];
 
-        // Always include current store card
-        const alreadySelf = list.some(p => {
+        const alreadySelf = list.some((p) => {
           const s1 = (p.store || "").toLowerCase();
           const s2 = (D.store || "").toLowerCase();
           const skuMatches = normalizeStoreKey(D.store, p.store_sku || "") === (snap.store_key || "");
@@ -476,10 +489,10 @@
           return s1 === s2 && (skuMatches || urlMatches);
         });
         if (!alreadySelf) {
-          list.push({ store: D.store, product_name: snap.title, price_cents: snap.price_cents, url: location.href, notes: null  });
+          list.push({ store: D.store, product_name: snap.title, price_cents: snap.price_cents, url: location.href, notes: null });
         }
 
-        const hasAmazon = list.some(p => (p.store || "").toLowerCase() === "amazon");
+        const hasAmazon = list.some((p) => (p.store || "").toLowerCase() === "amazon");
         if (resolvedASIN && !hasAmazon) {
           list.push({
             store: "Amazon",
@@ -506,7 +519,6 @@
       }
       resultsEl.innerHTML = "";
 
-      // Sort by price, nulls last
       list.sort((a, b) => (a.price_cents ?? Infinity) - (b.price_cents ?? Infinity));
       const bestPrice = list[0].price_cents ?? Infinity;
 
@@ -523,8 +535,8 @@
         const storeKey = (p.store || "default").toLowerCase();
         const storeIcon = ICON(storeKey);
         const isBest = p.price_cents === bestPrice;
-        const details = [p.brand, p.category, p.variant_label].filter(Boolean).join(' · ');
-        const noteHtml = details ? `<div class="store-note">${details}</div>` : '';
+        const details = [p.brand, p.category, p.variant_label].filter(Boolean).join(" · ");
+        const noteHtml = details ? `<div class="store-note">${details}</div>` : "";
 
         item.innerHTML = `
           <div class="store-info">
@@ -545,7 +557,6 @@
       }
     },
 
-
     async openSidebar() { await this.ensure(); this.open = true; this.applyPagePush(); await this.populate(); },
     close() { if (!this.root) return; this.open = false; this.applyPagePush(); },
     toggle() { this.open ? this.close() : this.openSidebar(); },
@@ -554,7 +565,11 @@
     _productKey() {
       const site = siteOf();
       const D = DRIVERS[site] || DRIVERS.amazon;
-      const key = site === "amazon" ? (D.getASIN() || "") : (D.getStoreKey() || "");
+
+      const asin = D.getASIN ? D.getASIN() : "";
+      const variant = D.getVariantLabel ? D.getVariantLabel() : "";
+      const key = site === "amazon" ? `${asin}|${variant}` : (D.getStoreKey() || "");
+
       return `${key}|${location.pathname}`;
     },
 
@@ -575,19 +590,41 @@
     },
 
     _bindProductObservers() {
-      const debounced = this._debounce(this._refreshIfChanged.bind(this), 600);
-      const _pushState = history.pushState;
-      if (!_pushState.__pc_wrapped__) {
-        history.pushState = function() { _pushState.apply(this, arguments); debounced(); };
-        _pushState.__pc_wrapped__ = true;
-      }
-      window.addEventListener("popstate", debounced);
+      const triggerPopulate = this._debounce(() => {
+        setTimeout(() => this.populate().catch(() => {}), 600);
+      }, 250);
 
-      const root = document.getElementById("dp-container") || document.body;
-      this._mo = new MutationObserver(debounced);
-      this._mo.observe(root, { subtree: true, childList: true, attributes: true });
+      const root =
+        document.getElementById("dp-container") ||
+        document.getElementById("twister") ||
+        document.body;
 
-      debounced();
+      this._mo?.disconnect?.();
+      this._mo = new MutationObserver(triggerPopulate);
+      this._mo.observe(root, {
+        subtree: true,
+        childList: true,
+        attributes: true,
+        attributeFilter: [
+          "class",
+          "aria-pressed",
+          "aria-checked",
+          "aria-label",
+          "data-defaultasin",
+          "data-asin",
+          "value"
+        ]
+      });
+
+      let lastHref = location.href;
+      setInterval(() => {
+        if (location.href !== lastHref) {
+          lastHref = location.href;
+          triggerPopulate();
+        }
+      }, 700);
+
+      triggerPopulate();
     },
 
     _bindRuntimeMessage() {
@@ -601,7 +638,7 @@
       this._bindProductObservers();
       window.addEventListener("pageshow", (e) => { if (e.persisted && this.open) this.applyPagePush(); });
       globalThis.__PC_SINGLETON__ = this;
-      window.PS = this; // optional debug
+      window.PS = this;
     }
   };
 
