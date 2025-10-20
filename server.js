@@ -35,18 +35,23 @@ function normalizeStoreKey(store, key) {
   return k;
 }
 
+// UPC normalization snippet for SQL joins
+const NORM_UPC_SQL = (expr) => `
+  CASE
+    WHEN ${expr} IS NULL THEN NULL
+    ELSE
+      CASE
+        WHEN btrim(${expr}) ~ '^0[0-9]{12}$' THEN substring(btrim(${expr}) from 2) -- drop leading 0 on EAN13
+        WHEN btrim(${expr}) ~ '^[0-9]{12}$' THEN btrim(${expr})
+        ELSE btrim(${expr})
+      END
+  END
+`;
+
 // Health
-app.get('/health', (_req, res) => res.json({ ok: true, version: 'v11-upc-first-clean' }));
+app.get('/health', (_req, res) => res.json({ ok: true, version: 'v13-upc-first-correct-variant' }));
 
-/*
-  GET /v1/resolve?store=Target&store_key=12345
-  Returns { asin: "B0..." | null }
-
-  Logic:
-  1) Find listing by (store, store_sku)
-  2) If listing.upc exists, map to asins.asin via upc
-  3) Else if listing.asin exists, return that
-*/
+// Resolve: find listing, prefer UPC to map to ASIN, else use listing.asin
 app.get('/v1/resolve', async (req, res) => {
   const store = String(req.query.store || '').trim();
   const rawKey = String(req.query.store_key || '').trim();
@@ -56,11 +61,11 @@ app.get('/v1/resolve', async (req, res) => {
   try {
     const rL = await pool.query(
       `SELECT l.asin, l.upc
-       FROM public.listings l
-       WHERE lower(btrim(l.store)) = lower(btrim($1))
-         AND btrim(l.store_sku) = $2
-       ORDER BY l.current_price_observed_at DESC NULLS LAST, l.id DESC
-       LIMIT 1`,
+         FROM public.listings l
+        WHERE lower(btrim(l.store)) = lower(btrim($1))
+          AND btrim(l.store_sku) = $2
+        ORDER BY l.current_price_observed_at DESC NULLS LAST, l.id DESC
+        LIMIT 1`,
       [store, key]
     );
     const l = rL.rows[0];
@@ -68,15 +73,13 @@ app.get('/v1/resolve', async (req, res) => {
 
     if (l.upc) {
       const rA = await pool.query(
-        `SELECT asin
-           FROM public.asins
-          WHERE upc = $1 AND asin IS NOT NULL
+        `SELECT asin FROM public.asins
+          WHERE ${NORM_UPC_SQL('upc')} = ${NORM_UPC_SQL('$1')}
+            AND asin IS NOT NULL
           LIMIT 1`,
         [l.upc]
       );
-      if (rA.rows[0]?.asin) {
-        return res.json({ asin: String(rA.rows[0].asin).toUpperCase() });
-      }
+      if (rA.rows[0]?.asin) return res.json({ asin: String(rA.rows[0].asin).toUpperCase() });
     }
 
     if (l.asin) return res.json({ asin: String(l.asin).toUpperCase() });
@@ -88,55 +91,41 @@ app.get('/v1/resolve', async (req, res) => {
   }
 });
 
-// Exact logic: asin -> asins.upc -> listings by upc, fallback to listings by asin
+// Compare: ASIN -> get UPC from asins -> match listings by UPC first, else ASIN (case-insensitive)
 app.get('/v1/compare', async (req, res) => {
   const asin = String(req.query.asin || '').trim().toUpperCase();
   if (!asin || !/^[A-Z0-9]{10}$/.test(asin)) return res.json({ results: [] });
-
-  // helper used inline for safe UPC equality (handles leading 0 on EAN13)
-  const NORM_UPC_SQL = (expr) => `
-    CASE
-      WHEN ${expr} IS NULL THEN NULL
-      ELSE
-        CASE
-          WHEN btrim(${expr}) ~ '^0[0-9]{12}$' THEN substring(btrim(${expr}) from 2)
-          WHEN btrim(${expr}) ~ '^[0-9]{12}$' THEN btrim(${expr})
-          ELSE btrim(${expr})
-        END
-    END
-  `;
 
   try {
     const sql = `
       WITH v AS (
         SELECT a.asin,
                a.upc,
-               a.current_price_cents  AS amazon_price_cents,
-               a.current_price_observed_at AS amazon_observed_at,
-               p.title AS product_title,
+               a.variant_label,
+               a.current_price_cents        AS amazon_price_cents,
+               a.current_price_observed_at  AS amazon_observed_at,
+               p.title                      AS product_title,
                p.brand,
                p.category
-        FROM public.asins a
-        LEFT JOIN public.products p ON p.id = a.product_id
-        WHERE upper(a.asin) = $1
-        LIMIT 1
+          FROM public.asins a
+          LEFT JOIN public.products p ON p.id = a.product_id
+         WHERE upper(a.asin) = $1
+         LIMIT 1
       ),
-      -- Step 4: UPC matches only
       match_upc AS (
         SELECT l.store, l.store_sku, l.url,
                l.current_price_cents AS price_cents,
                l.current_price_observed_at AS observed_at
-        FROM public.listings l
-        JOIN v ON ${NORM_UPC_SQL('v.upc')} IS NOT NULL
-              AND ${NORM_UPC_SQL('l.upc')} = ${NORM_UPC_SQL('v.upc')}
+          FROM public.listings l
+          JOIN v ON ${NORM_UPC_SQL('v.upc')} IS NOT NULL
+               AND ${NORM_UPC_SQL('l.upc')} = ${NORM_UPC_SQL('v.upc')}
       ),
-      -- Step 5 fallback: ASIN matches only if UPC matches are empty
       match_asin AS (
         SELECT l.store, l.store_sku, l.url,
                l.current_price_cents AS price_cents,
                l.current_price_observed_at AS observed_at
-        FROM public.listings l
-        JOIN v ON upper(l.asin) = v.asin
+          FROM public.listings l
+          JOIN v ON upper(l.asin) = v.asin
       ),
       chosen AS (
         SELECT * FROM match_upc
@@ -144,7 +133,7 @@ app.get('/v1/compare', async (req, res) => {
         SELECT * FROM match_asin
         WHERE NOT EXISTS (SELECT 1 FROM match_upc LIMIT 1)
       )
-      -- Amazon row if it has a current price
+      -- Amazon row only if it has a current price
       SELECT
         'Amazon'::text AS store,
         v.asin,
@@ -161,7 +150,7 @@ app.get('/v1/compare', async (req, res) => {
 
       UNION ALL
 
-      -- Other stores from chosen set
+      -- Other stores
       SELECT
         c.store,
         (SELECT asin FROM v),
@@ -201,6 +190,7 @@ app.get('/v1/compare', async (req, res) => {
   }
 });
 
+// Observe: write price_history and ensure holders exist
 app.post('/v1/observe', async (req, res) => {
   const { store, asin, store_sku, price_cents, url, title, observed_at } = req.body || {};
 
@@ -218,9 +208,7 @@ app.post('/v1/observe', async (req, res) => {
 
     if (storeNorm.toLowerCase() === 'amazon') {
       const asinUp = String(asin || '').toUpperCase();
-      if (!/^[A-Z0-9]{10}$/.test(asinUp)) {
-        throw new Error('asin required for Amazon');
-      }
+      if (!/^[A-Z0-9]{10}$/.test(asinUp)) throw new Error('asin required for Amazon');
 
       await client.query(
         `INSERT INTO public.asins (product_id, asin)
@@ -238,7 +226,6 @@ app.post('/v1/observe', async (req, res) => {
     } else {
       if (!skuNorm) throw new Error('store_sku required for non Amazon stores');
 
-      // listings table has no title column in your schema
       await client.query(
         `INSERT INTO public.listings (store, store_sku, url, status)
          VALUES ($1, $2, $3, 'active')
