@@ -1,3 +1,97 @@
+// server.js
+const express = require('express');
+const { Pool } = require('pg');
+
+const app = express();
+
+// basic config
+app.use(express.json({ limit: '256kb' }));
+app.use((req, res, next) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Vary', 'Origin');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Accept');
+  if (req.method === 'OPTIONS') return res.sendStatus(200);
+  next();
+});
+
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: { rejectUnauthorized: false }
+});
+
+// utils
+function normalizeStoreKey(store, key) {
+  if (!key) return '';
+  const s = String(store || '').toLowerCase();
+  let k = String(key || '').trim();
+  if (s === 'target') {
+    k = k.replace(/^A[-\s]?/i, '');
+    k = k.replace(/[^0-9A-Z]/g, '');
+  } else if (s === 'walmart' || s === 'bestbuy') {
+    k = k.replace(/\D+/g, '');
+  }
+  return k;
+}
+
+// health
+app.get('/health', (_req, res) => res.json({ ok: true, version: 'v10-upc-first' }));
+
+/*
+  GET /v1/resolve?store=Target&store_key=TCIN_or_SKU
+  Returns { asin: "B0..." | null }
+  Logic:
+    1) Find the listing (store, store_sku)
+    2) If listing.upc exists, map to asins.asin by upc
+    3) Else if listing.asin exists, use that
+*/
+app.get('/v1/resolve', async (req, res) => {
+  const store = String(req.query.store || '').trim();
+  const rawKey = String(req.query.store_key || '').trim();
+  const key = normalizeStoreKey(store, rawKey);
+  if (!store || !key) return res.json({ asin: null });
+
+  try {
+    const qListing = `
+      SELECT l.asin, l.upc
+      FROM public.listings l
+      WHERE lower(btrim(l.store)) = lower(btrim($1))
+        AND btrim(l.store_sku) = $2
+      ORDER BY l.current_price_observed_at DESC NULLS LAST, l.id DESC
+      LIMIT 1
+    `;
+    const rL = await pool.query(qListing, [store, key]);
+    const l = rL.rows[0];
+    if (!l) return res.json({ asin: null });
+
+    if (l.upc) {
+      const rA = await pool.query(
+        `SELECT asin FROM public.asins WHERE upc = $1 AND asin IS NOT NULL LIMIT 1`,
+        [l.upc]
+      );
+      if (rA.rows[0]?.asin) {
+        return res.json({ asin: String(rA.rows[0].asin).toUpperCase() });
+      }
+    }
+
+    if (l.asin) return res.json({ asin: String(l.asin).toUpperCase() });
+
+    return res.json({ asin: null });
+  } catch (e) {
+    console.error('resolve error:', e);
+    return res.json({ asin: null });
+  }
+});
+
+/*
+  GET /v1/compare?asin=B0XXXXXXXX
+  Returns { results: [...] }
+  Logic:
+    - Pull the input ASIN row from asins, including its UPC
+    - Prefer joining listings by UPC
+    - If UPC yields nothing, fall back to joining listings by ASIN
+    - Include Amazon price row if present on asins
+*/
 app.get('/v1/compare', async (req, res) => {
   const asin = String(req.query.asin || '').trim().toUpperCase();
   if (!asin || !/^[A-Z0-9]{10}$/.test(asin)) return res.json({ results: [] });
@@ -19,36 +113,28 @@ app.get('/v1/compare', async (req, res) => {
          WHERE upper(a.asin) = $1
          LIMIT 1
       ),
-
-      -- First try to use UPC to gather other stores
       other_via_upc AS (
         SELECT l.store, l.store_sku, l.url,
                l.current_price_cents AS price_cents,
                l.current_price_observed_at AS observed_at,
-               l.title, l.status,
-               l.upc
+               l.title, l.status, l.upc
           FROM public.listings l
           JOIN input_variant v ON v.upc IS NOT NULL AND l.upc = v.upc
       ),
-
-      -- If UPC did not find anything, fall back to ASIN joins
       other_via_asin AS (
         SELECT l.store, l.store_sku, l.url,
                l.current_price_cents AS price_cents,
                l.current_price_observed_at AS observed_at,
-               l.title, l.status,
-               l.upc
+               l.title, l.status, l.upc
           FROM public.listings l
           JOIN input_variant v ON l.asin = v.asin
       ),
-
       other_stores AS (
         SELECT * FROM other_via_upc
         UNION ALL
         SELECT * FROM other_via_asin
         WHERE NOT EXISTS (SELECT 1 FROM other_via_upc LIMIT 1)
       )
-
       SELECT
         'Amazon'::text AS store,
         v.asin,
@@ -59,8 +145,7 @@ app.get('/v1/compare', async (req, res) => {
         v.product_title AS title,
         v.brand,
         v.category,
-        v.variant_label,
-        NULL::text AS notes
+        v.variant_label
       FROM input_variant v
       WHERE v.amazon_price_cents IS NOT NULL
 
@@ -76,8 +161,7 @@ app.get('/v1/compare', async (req, res) => {
         COALESCE(o.title, (SELECT product_title FROM input_variant)),
         NULL::text AS brand,
         NULL::text AS category,
-        NULL::text AS variant_label,
-        NULL::text AS notes
+        NULL::text AS variant_label
       FROM other_stores o
 
       ORDER BY price_cents ASC NULLS LAST, store ASC;
@@ -105,3 +189,80 @@ app.get('/v1/compare', async (req, res) => {
     res.status(500).json({ results: [] });
   }
 });
+
+/*
+  POST /v1/observe
+  Body: { store, asin?, store_sku?, price_cents, url?, title?, observed_at? }
+  Behavior:
+    - Ensures holder row exists (asins for Amazon, listings for others)
+    - Inserts into price_history
+    - Trigger updates current_price_* on holder
+*/
+app.post('/v1/observe', async (req, res) => {
+  const { store, asin, store_sku, price_cents, url, title, observed_at } = req.body || {};
+
+  const storeNorm = String(store || '').trim();
+  const skuNorm = normalizeStoreKey(storeNorm, store_sku || null);
+  const cents = Number.isFinite(price_cents) ? price_cents : null;
+
+  if (!storeNorm || !Number.isFinite(cents)) {
+    return res.status(400).json({ ok: false, error: 'store and price_cents required' });
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    if (storeNorm.toLowerCase() === 'amazon') {
+      const asinUp = String(asin || '').toUpperCase();
+      if (!/^[A-Z0-9]{10}$/.test(asinUp)) {
+        throw new Error('asin required for Amazon');
+      }
+
+      await client.query(
+        `INSERT INTO public.asins (product_id, asin)
+         VALUES (NULL, $1)
+         ON CONFLICT (asin) DO NOTHING`,
+        [asinUp]
+      );
+
+      await client.query(
+        `INSERT INTO public.price_history (store, asin, price_cents, observed_at, url, title)
+         VALUES ('Amazon', $1, $2, COALESCE($3::timestamptz, now()), $4, $5)`,
+        [asinUp, cents, observed_at || null, url || null, title || null]
+      );
+
+    } else {
+      if (!skuNorm) throw new Error('store_sku required for non Amazon stores');
+
+      await client.query(
+        `INSERT INTO public.listings (store, store_sku, url, title, status)
+         VALUES ($1, $2, $3, $4, 'active')
+         ON CONFLICT (store, store_sku)
+         DO UPDATE SET url = EXCLUDED.url, title = EXCLUDED.title`,
+        [storeNorm, skuNorm, url || null, title || null]
+      );
+
+      await client.query(
+        `INSERT INTO public.price_history (store, store_sku, price_cents, observed_at, url, title)
+         VALUES ($1, $2, $3, COALESCE($4::timestamptz, now()), $5, $6)`,
+        [storeNorm, skuNorm, cents, observed_at || null, url || null, title || null]
+      );
+    }
+
+    await client.query('COMMIT');
+    res.json({ ok: true });
+  } catch (e) {
+    await client.query('ROLLBACK');
+    console.error('observe error:', e.message);
+    res.status(400).json({ ok: false, error: e.message });
+  } finally {
+    client.release();
+  }
+});
+
+// start and shutdown
+const PORT = process.env.PORT || 4000;
+app.listen(PORT, '0.0.0.0', () => console.log(`API listening on ${PORT}`));
+process.on('SIGINT', async () => { try { await pool.end(); } finally { process.exit(0); } });
+process.on('SIGTERM', async () => { try { await pool.end(); } finally { process.exit(0); } });
