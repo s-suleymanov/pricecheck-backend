@@ -88,59 +88,63 @@ app.get('/v1/resolve', async (req, res) => {
   }
 });
 
-/*
-  GET /v1/compare?asin=B0XXXXXXXX
-  Returns { results: [...] }
-
-  Logic:
-  - Load ASIN row from asins, include UPC and product info
-  - Prefer joining listings by UPC
-  - If no UPC match, fall back to joining listings by ASIN
-  - Include Amazon price row if available
-*/
+// Exact logic: asin -> asins.upc -> listings by upc, fallback to listings by asin
 app.get('/v1/compare', async (req, res) => {
   const asin = String(req.query.asin || '').trim().toUpperCase();
   if (!asin || !/^[A-Z0-9]{10}$/.test(asin)) return res.json({ results: [] });
 
+  // helper used inline for safe UPC equality (handles leading 0 on EAN13)
+  const NORM_UPC_SQL = (expr) => `
+    CASE
+      WHEN ${expr} IS NULL THEN NULL
+      ELSE
+        CASE
+          WHEN btrim(${expr}) ~ '^0[0-9]{12}$' THEN substring(btrim(${expr}) from 2)
+          WHEN btrim(${expr}) ~ '^[0-9]{12}$' THEN btrim(${expr})
+          ELSE btrim(${expr})
+        END
+    END
+  `;
+
   try {
     const sql = `
-      WITH input_variant AS (
+      WITH v AS (
         SELECT a.asin,
                a.upc,
-               a.id AS asin_row_id,
-               a.variant_label,
                a.current_price_cents  AS amazon_price_cents,
                a.current_price_observed_at AS amazon_observed_at,
                p.title AS product_title,
                p.brand,
                p.category
-          FROM public.asins a
-          LEFT JOIN public.products p ON p.id = a.product_id
-         WHERE upper(a.asin) = $1
-         LIMIT 1
+        FROM public.asins a
+        LEFT JOIN public.products p ON p.id = a.product_id
+        WHERE upper(a.asin) = $1
+        LIMIT 1
       ),
-      other_via_upc AS (
+      -- Step 4: UPC matches only
+      match_upc AS (
         SELECT l.store, l.store_sku, l.url,
                l.current_price_cents AS price_cents,
-               l.current_price_observed_at AS observed_at,
-               l.status, l.upc
-          FROM public.listings l
-          JOIN input_variant v ON v.upc IS NOT NULL AND l.upc = v.upc
+               l.current_price_observed_at AS observed_at
+        FROM public.listings l
+        JOIN v ON ${NORM_UPC_SQL('v.upc')} IS NOT NULL
+              AND ${NORM_UPC_SQL('l.upc')} = ${NORM_UPC_SQL('v.upc')}
       ),
-      other_via_asin AS (
+      -- Step 5 fallback: ASIN matches only if UPC matches are empty
+      match_asin AS (
         SELECT l.store, l.store_sku, l.url,
                l.current_price_cents AS price_cents,
-               l.current_price_observed_at AS observed_at,
-               l.status, l.upc
-          FROM public.listings l
-          JOIN input_variant v ON l.asin = v.asin
+               l.current_price_observed_at AS observed_at
+        FROM public.listings l
+        JOIN v ON upper(l.asin) = v.asin
       ),
-      other_stores AS (
-        SELECT * FROM other_via_upc
+      chosen AS (
+        SELECT * FROM match_upc
         UNION ALL
-        SELECT * FROM other_via_asin
-        WHERE NOT EXISTS (SELECT 1 FROM other_via_upc LIMIT 1)
+        SELECT * FROM match_asin
+        WHERE NOT EXISTS (SELECT 1 FROM match_upc LIMIT 1)
       )
+      -- Amazon row if it has a current price
       SELECT
         'Amazon'::text AS store,
         v.asin,
@@ -152,23 +156,24 @@ app.get('/v1/compare', async (req, res) => {
         v.brand,
         v.category,
         v.variant_label
-      FROM input_variant v
+      FROM v
       WHERE v.amazon_price_cents IS NOT NULL
 
       UNION ALL
 
+      -- Other stores from chosen set
       SELECT
-        o.store,
-        (SELECT asin FROM input_variant),
-        o.store_sku,
-        o.price_cents,
-        o.observed_at,
-        o.url,
-        (SELECT product_title FROM input_variant) AS title,
+        c.store,
+        (SELECT asin FROM v),
+        c.store_sku,
+        c.price_cents,
+        c.observed_at,
+        c.url,
+        (SELECT product_title FROM v) AS title,
         NULL::text AS brand,
         NULL::text AS category,
         NULL::text AS variant_label
-      FROM other_stores o
+      FROM chosen c
 
       ORDER BY price_cents ASC NULLS LAST, store ASC;
     `;
@@ -196,16 +201,6 @@ app.get('/v1/compare', async (req, res) => {
   }
 });
 
-/*
-  POST /v1/observe
-  Body: { store, asin?, store_sku?, price_cents, url?, title?, observed_at? }
-
-  Behavior:
-  - Ensure asins row exists for Amazon
-  - Ensure listings row exists for non Amazon
-  - Insert into price_history
-  - DB trigger updates current_price_* on holders
-*/
 app.post('/v1/observe', async (req, res) => {
   const { store, asin, store_sku, price_cents, url, title, observed_at } = req.body || {};
 
