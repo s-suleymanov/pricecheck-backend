@@ -619,13 +619,27 @@
         bcEl.textContent = bc || "—";
       }
 
-      if (Number.isFinite(snap.price_cents)) {
-        const payload =
-          site === "amazon"
-            ? { store: "Amazon", asin: snap.asin || null, price_cents: snap.price_cents, url: location.href, title: snap.title }
-            : { store: D.store, store_sku: snap.store_key || null, price_cents: snap.price_cents, url: location.href, title: snap.title };
-        try { await safeSend({ type: "OBSERVE_PRICE", payload }); } catch {}
-      }
+      if (site === "amazon") {
+      const payload = {
+        store: "Amazon",
+        asin: snap.asin || null,
+        price_cents: snap.price_cents,
+        url: location.href,
+        title: snap.title
+      };
+      try { await safeSend({ type: "OBSERVE_PRICE", payload }); } catch {}
+    } else if (snap.store_key) { // store_key must be UPC now
+      const payload = {
+        store: D.store,
+        upc: snap.store_key,       // <— this is the fix
+        price_cents: snap.price_cents,
+        url: location.href,
+        title: snap.title
+      };
+      try { await safeSend({ type: "OBSERVE_PRICE", payload }); } catch {}
+    }
+    // else: no UPC found on page, do not call observe to avoid the error
+
 
       if (!list.length) {
         statusEl.textContent = "No prices found.";
