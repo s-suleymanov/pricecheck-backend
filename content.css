@@ -39,12 +39,21 @@
   color:#333; font-weight:600;
 }
 
-/* Variant: wrap fully (no ellipsis), show everything */
 .variant-row #ps-variant-val {
-  white-space: normal;            /* allow wrapping */
-  word-break: break-word;         /* break long tokens if needed */
-  overflow: visible;              /* no clipping */
+  white-space: normal;
+  word-break: break-word;
+  overflow: visible;
+  color: #444;
 }
+
+.ps-variant-val { 
+  font-size: 12px; 
+  color: #666; 
+  margin-top: 2px; 
+  line-height: 1.25; 
+}
+
+
 
 /* Content & Results */
 .content { padding: 16px; overflow-y: auto; flex-grow: 1; }
@@ -53,10 +62,11 @@
 
 .store-note {
   font-size: 12px;
-  color: var(--muted);
+  color: #666;       /* was var(--muted) which may be undefined */
   margin-top: 2px;
-  line-height: 1.2;
+  line-height: 1.25;
 }
+
 
 /* Result Card */
 .result-card {

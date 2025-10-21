@@ -1,4 +1,4 @@
-// content.js - unified multi-site, hardened singleton, ASIN or store_sku flow
+// content.js - stable cards, correct Amazon price, subheader shows Brand · Category, cards show per-store variant
 (() => {
   "use strict";
 
@@ -45,13 +45,43 @@
     return k;
   }
 
+  // ---------- robust Amazon price ----------
+  function getAmazonPriceCents() {
+    // Preferred: price to pay
+    const pref = document.querySelector(".priceToPay .a-offscreen");
+    if (pref?.innerText) {
+      const v = toCents(pref.innerText);
+      if (Number.isFinite(v)) return v;
+    }
+    // Fallbacks: any a-offscreen that is NOT inside strikethrough/list/was-price containers
+    const nodes = Array.from(document.querySelectorAll(".a-price .a-offscreen, [data-a-color='price'] .a-offscreen, #corePrice_feature_div .a-offscreen"));
+    for (const el of nodes) {
+      if (!el?.innerText) continue;
+      // skip crossed-out/compare prices
+      let bad = false;
+      let p = el;
+      for (let i = 0; i < 4 && p; i++) {
+        if (
+          p.classList?.contains("a-text-price") ||            // strikethrough
+          p.classList?.contains("basisPrice")   ||            // list MSRP
+          p.getAttribute?.("data-a-strike") === "true"
+        ) { bad = true; break; }
+        p = p.parentElement;
+      }
+      if (bad) continue;
+      const v = toCents(el.innerText);
+      if (Number.isFinite(v)) return v;
+    }
+    return null;
+  }
+
   // price helper
   const toCents = (txt = "") => {
     const n = parseFloat(String(txt).replace(/[^0-9.]/g, ""));
     return isNaN(n) ? null : Math.round(n * 100);
   };
 
-  // ---------- drivers per site ----------
+  // ---------- drivers ----------
   const DRIVERS = {
     amazon: {
       store: "Amazon",
@@ -68,7 +98,6 @@
           .trim();
 
         const picks = new Set();
-
         const btnSelectors = [
           "#twister .a-button-selected .a-button-text",
           "#inline-twister-expander-content .a-button-selected .a-button-text",
@@ -189,22 +218,7 @@
         return "";
       },
       getPriceCents() {
-        const sels = [
-          "#corePrice_feature_div .a-offscreen",
-          ".priceToPay .a-offscreen",
-          "#price .a-offscreen",
-          "#price_inside_buybox",
-          "[data-a-color='price'] .a-offscreen",
-          ".a-price .a-offscreen"
-        ];
-        for (const sel of sels) {
-          const el = document.querySelector(sel);
-          if (el?.innerText) {
-            const cents = toCents(el.innerText);
-            if (cents != null) return cents;
-          }
-        }
-        return null;
+        return getAmazonPriceCents();
       },
       getASIN() {
         const fromUrl = location.pathname.match(/(?:dp|gp\/product)\/([A-Z0-9]{10})(?:[/?]|$)/i)?.[1];
@@ -217,9 +231,7 @@
 
     target: {
       store: "Target",
-      getTitle() {
-        return clean(document.querySelector('h1[data-test="product-title"]')?.innerText || document.title);
-      },
+      getTitle() { return clean(document.querySelector('h1[data-test="product-title"]')?.innerText || document.title); },
       getPriceCents() {
         const sels = [
           '[data-test="product-price"]',
@@ -274,10 +286,7 @@
         const m = location.pathname.match(/\/ip\/[^/]+\/(\d+)/);
         if (m) return normalizeStoreKey("Walmart", m[1]);
         for (const s of document.querySelectorAll('script[type="application/ld+json"]')) {
-          try {
-            const j = JSON.parse(s.textContent.trim());
-            if (j?.sku) return normalizeStoreKey("Walmart", String(j.sku));
-          } catch {}
+          try { const j = JSON.parse(s.textContent.trim()); if (j?.sku) return normalizeStoreKey("Walmart", String(j.sku)); } catch {}
         }
         const meta = document.querySelector('meta[property="product:retailer_item_id"]')?.content;
         if (meta) return normalizeStoreKey("Walmart", meta);
@@ -331,7 +340,7 @@
     return text;
   }
 
-  // ---------- singleton controller ----------
+  // ---------- singleton ----------
   const PS = {
     id: ROOT_ID,
     width: 380,
@@ -344,6 +353,7 @@
     _inflight: null,
 
     async ensure() {
+      // remove duplicate roots, keep first
       const all = Array.from(document.querySelectorAll(`#${this.id}`));
       for (let i = 1; i < all.length; i++) all[i].remove();
 
@@ -384,6 +394,7 @@
       const logoEl = sh.querySelector("#ps-logo");
       if (logoEl) logoEl.src = chrome.runtime.getURL("icons/logo.png");
 
+      // resizer
       let resizing = false;
       sh.querySelector("#ps-resize")?.addEventListener("mousedown", (e) => {
         e.preventDefault();
@@ -421,6 +432,75 @@
       }
     },
 
+    // ---------- reconcile helpers ----------
+    _reconcileResults(resultsEl, list, iconFor) {
+      const makeKey = (p) =>
+        `${(p.store || '').toLowerCase()}|${p.asin || p.url || ''}`;
+
+      const next = new Map();
+      list.forEach(p => next.set(makeKey(p), p));
+
+      const existing = Array.from(resultsEl.querySelectorAll('.result-card'));
+      const seen = new Set();
+
+      for (const el of existing) {
+        const k = el.dataset.key || '';
+        const p = next.get(k);
+        if (!p) { el.remove(); continue; }
+        seen.add(k);
+
+        // price
+        const newPrice = Number.isFinite(p.price_cents) ? `$${(p.price_cents / 100).toFixed(2)}` : '';
+        const priceEl = el.querySelector('.price');
+        if (priceEl && priceEl.textContent !== newPrice) priceEl.textContent = newPrice;
+
+        // per-card variant label
+        const newVar = p.variant_label ? String(p.variant_label).trim() : "";
+        const varEl = el.querySelector('.ps-variant-val');
+        if (varEl) {
+          varEl.textContent = newVar;
+          varEl.style.display = newVar ? '' : 'none';
+        }
+
+        // link
+        if (p.url && el.href !== p.url) {
+          el.href = p.url;
+          el.target = '_blank';
+          el.rel = 'noopener noreferrer';
+        }
+      }
+
+      for (const [k, p] of next.entries()) {
+        if (seen.has(k)) continue;
+
+        const item = document.createElement("a");
+        item.className = "result-card";
+        item.dataset.key = k;
+        if (p.url) { item.href = p.url; item.target = '_blank'; item.rel = 'noopener noreferrer'; }
+        else item.href = '#';
+
+        const price = Number.isFinite(p.price_cents) ? (p.price_cents / 100).toFixed(2) : "";
+        const storeKey = (p.store || "default").toLowerCase();
+        const storeIcon = iconFor(storeKey);
+        const variantText = p.variant_label ? String(p.variant_label).trim() : "";
+
+        item.innerHTML = `
+          <div class="store-info">
+            <img src="${storeIcon}" alt="${p.store || "Store"} logo" class="store-logo">
+            <div class="store-and-product">
+              <span class="store-name">${p.store || "Unknown"}</span>
+              <span class="ps-variant-val" style="${variantText ? "" : "display:none"}">${variantText || ""}</span>
+            </div>
+          </div>
+          <div class="price-info">
+            <span class="price">${price ? `$${price}` : ""}</span>
+          </div>
+        `;
+        if (storeKey === "amazon") item.classList.add("current-site");
+        resultsEl.appendChild(item);
+      }
+    },
+
     async populate() {
       if (!this.shadow) return;
       const sh = this.shadow;
@@ -433,19 +513,101 @@
         title: D.getTitle(),
         asin: D.getASIN ? D.getASIN() : null,
         price_cents: D.getPriceCents ? D.getPriceCents() : null,
-        store_key: D.getStoreKey ? D.getStoreKey() : null,
-        variant_label: D.getVariantLabel ? D.getVariantLabel() : null
+        store_key: D.getStoreKey ? D.getStoreKey() : null
       };
       await safeSet({ lastSnapshot: snap });
 
-      const variantEl = sh.querySelector("#ps-variant-val");
-      if (variantEl) {
-        const freshVariant = D.getVariantLabel ? D.getVariantLabel() : "";
-        variantEl.textContent = (freshVariant || snap.variant_label || "").trim() || "—";
+      const resultsEl = $("#ps-results");
+      if (!resultsEl) return;
+      let statusEl = resultsEl.querySelector(".status");
+      if (!statusEl) {
+        statusEl = document.createElement("div");
+        statusEl.className = "status";
+        resultsEl.prepend(statusEl);
+      }
+      statusEl.style.display = "block";
+      statusEl.textContent = "Searching...";
+
+      // Build list via backend so we can also grab Brand/Category for the subheader
+      let list = [];
+      let resolvedASIN = snap.asin;
+
+      if (site === "amazon") {
+        if (!snap.asin) { statusEl.textContent = "ASIN not found on this page."; return; }
+        const resp = await safeSend({ type: "COMPARE_REQUEST", payload: { asin: snap.asin } });
+        list = Array.isArray(resp?.results) ? resp.results.slice() : [];
+
+        const hasAmazon = list.some(p => (p.store || "").toLowerCase() === "amazon");
+        if (!hasAmazon) {
+          list.push({
+            store: "Amazon",
+            product_name: snap.title,
+            price_cents: snap.price_cents,
+            url: location.href,
+            variant_label: DRIVERS.amazon.getVariantLabel ? DRIVERS.amazon.getVariantLabel() : null
+          });
+        }
+      } else {
+        const resp = await safeSend({
+          type: "RESOLVE_COMPARE_REQUEST",
+          payload: { store: D.store, store_key: snap.store_key || "", title: snap.title }
+        });
+        resolvedASIN = resp?.asin || null;
+
+        const asinEl = sh.querySelector("#ps-asin-val");
+        if (asinEl) asinEl.textContent = resolvedASIN || "Unknown";
+
+        list = Array.isArray(resp?.results) ? resp.results.slice() : [];
+
+        const alreadySelf = list.some(p => {
+          const s1 = (p.store || "").toLowerCase();
+          const s2 = (D.store || "").toLowerCase();
+          const urlMatches = p.url && p.url.split("?")[0] === location.href.split("?")[0];
+          return s1 === s2 && urlMatches;
+        });
+        if (!alreadySelf) {
+          list.push({
+            store: D.store,
+            product_name: snap.title,
+            price_cents: snap.price_cents,
+            url: location.href,
+            variant_label: null
+          });
+        }
+
+        const hasAmazon = list.some(p => (p.store || "").toLowerCase() === "amazon");
+        if (resolvedASIN && !hasAmazon) {
+          list.push({
+            store: "Amazon",
+            product_name: snap.title || "View on Amazon",
+            price_cents: null,
+            url: `https://www.amazon.com/dp/${resolvedASIN}`,
+            variant_label: null
+          });
+        }
+        if (!resolvedASIN) {
+          const q = snap.title || snap.store_key || "";
+          list.push({
+            store: "Amazon",
+            product_name: "Search for a match",
+            price_cents: null,
+            url: `https://www.amazon.com/s?k=${encodeURIComponent(q)}`,
+            variant_label: null
+          });
+        }
       }
 
+      // Subheader: ASIN + Brand · Category (from DB via compare results)
       const asinEl = sh.querySelector("#ps-asin-val");
-      asinEl && (asinEl.textContent = snap.asin || (site === "amazon" ? "Not found" : "Resolving..."));
+      if (asinEl) asinEl.textContent = resolvedASIN || snap.asin || (site === "amazon" ? "Not found" : "Resolving...");
+      const bcEl = sh.querySelector("#ps-variant-val"); // reused to show Brand · Category
+      if (bcEl) {
+        const amazonRow = list.find(r => (r.store || "").toLowerCase() === "amazon");
+        const brand = amazonRow?.brand || null;
+        const category = amazonRow?.category || null;
+        const bc = [brand, category].filter(Boolean).join(" · ");
+        bcEl.textContent = bc || "—";
+      }
 
       if (Number.isFinite(snap.price_cents)) {
         const payload =
@@ -455,106 +617,18 @@
         try { await safeSend({ type: "OBSERVE_PRICE", payload }); } catch {}
       }
 
-      const resultsEl = $("#ps-results");
-      if (!resultsEl) return;
-      resultsEl.innerHTML = `<div class="status">Searching...</div>`;
-
-      let list = [];
-
-      if (site === "amazon") {
-        if (!snap.asin) { resultsEl.innerHTML = `<div class="status">ASIN not found on this page.</div>`; return; }
-        const resp = await safeSend({ type: "COMPARE_REQUEST", payload: { asin: snap.asin } });
-        list = Array.isArray(resp?.results) ? resp.results.slice() : [];
-
-        const hasAmazon = list.some((p) => (p.store || "").toLowerCase() === "amazon");
-        if (!hasAmazon) {
-          list.push({ store: "Amazon", product_name: snap.title, price_cents: snap.price_cents, url: location.href });
-        }
-      } else {
-        const resp = await safeSend({
-          type: "RESOLVE_COMPARE_REQUEST",
-          payload: { store: D.store, store_key: snap.store_key || "", title: snap.title }
-        });
-
-        const resolvedASIN = resp?.asin || null;
-        if (asinEl) asinEl.textContent = resolvedASIN || "Unknown";
-
-        list = Array.isArray(resp?.results) ? resp.results.slice() : [];
-
-        const alreadySelf = list.some((p) => {
-          const s1 = (p.store || "").toLowerCase();
-          const s2 = (D.store || "").toLowerCase();
-          const skuMatches = normalizeStoreKey(D.store, p.store_sku || "") === (snap.store_key || "");
-          const urlMatches = p.url && p.url.split("?")[0] === location.href.split("?")[0];
-          return s1 === s2 && (skuMatches || urlMatches);
-        });
-        if (!alreadySelf) {
-          list.push({ store: D.store, product_name: snap.title, price_cents: snap.price_cents, url: location.href, notes: null });
-        }
-
-        const hasAmazon = list.some((p) => (p.store || "").toLowerCase() === "amazon");
-        if (resolvedASIN && !hasAmazon) {
-          list.push({
-            store: "Amazon",
-            product_name: snap.title || "View on Amazon",
-            price_cents: null,
-            url: `https://www.amazon.com/dp/${resolvedASIN}`
-          });
-        }
-
-        if (!resolvedASIN) {
-          const q = snap.title || snap.store_key || "";
-          list.push({
-            store: "Amazon",
-            product_name: "Search for a match",
-            price_cents: null,
-            url: `https://www.amazon.com/s?k=${encodeURIComponent(q)}`
-          });
-        }
-      }
-
-      if (list.length === 0) {
-        resultsEl.innerHTML = `<div class="status">No prices found.</div>`;
+      if (!list.length) {
+        statusEl.textContent = "No prices found.";
+        statusEl.style.display = "block";
         return;
       }
-      resultsEl.innerHTML = "";
 
       list.sort((a, b) => (a.price_cents ?? Infinity) - (b.price_cents ?? Infinity));
-      const bestPrice = list[0].price_cents ?? Infinity;
+      statusEl.textContent = "";
+      statusEl.style.display = "none";
 
       const ICON = (k) => ICONS[k] || ICONS.default;
-
-      for (const p of list) {
-        const item = document.createElement("a");
-        item.className = "result-card";
-        item.href = p.url || "#";
-        if (p.url) { item.target = "_blank"; item.rel = "noopener noreferrer"; }
-        else item.addEventListener("click", (e) => e.preventDefault());
-
-        const price = Number.isFinite(p.price_cents) ? (p.price_cents / 100).toFixed(2) : "";
-        const storeKey = (p.store || "default").toLowerCase();
-        const storeIcon = ICON(storeKey);
-        const isBest = p.price_cents === bestPrice;
-        const details = [p.brand, p.category, p.variant_label].filter(Boolean).join(" · ");
-        const noteHtml = details ? `<div class="store-note">${details}</div>` : "";
-
-        item.innerHTML = `
-          <div class="store-info">
-            <img src="${storeIcon}" alt="${p.store || "Store"} logo" class="store-logo">
-            <div class="store-and-product">
-              <span class="store-name">${p.store || "Unknown"}</span>
-              ${noteHtml}
-            </div>
-          </div>
-          <div class="price-info">
-            <span class="price">${price ? `$${price}` : ""}</span>
-            ${isBest && storeKey !== "amazon" ? `<span class="savings-tag best-price">Best Price</span>` : ""}
-          </div>
-        `;
-
-        if (storeKey === "amazon") item.classList.add("current-site");
-        resultsEl.appendChild(item);
-      }
+      this._reconcileResults(resultsEl, list, ICON);
     },
 
     async openSidebar() { await this.ensure(); this.open = true; this.applyPagePush(); await this.populate(); },
@@ -562,14 +636,13 @@
     toggle() { this.open ? this.close() : this.openSidebar(); },
 
     _debounce(fn, wait = 600) { return (...args) => { clearTimeout(this._debounceTimer); this._debounceTimer = setTimeout(() => fn.apply(this, args), wait); }; },
+
     _productKey() {
       const site = siteOf();
       const D = DRIVERS[site] || DRIVERS.amazon;
-
       const asin = D.getASIN ? D.getASIN() : "";
       const variant = D.getVariantLabel ? D.getVariantLabel() : "";
       const key = site === "amazon" ? `${asin}|${variant}` : (D.getStoreKey() || "");
-
       return `${key}|${location.pathname}`;
     },
 
@@ -590,41 +663,41 @@
     },
 
     _bindProductObservers() {
-      const triggerPopulate = this._debounce(() => {
-        setTimeout(() => this.populate().catch(() => {}), 600);
-      }, 250);
+      const triggerCheck = this._debounce(() => {
+        setTimeout(() => this._refreshIfChanged().catch(() => {}), 300);
+      }, 200);
 
       const root =
-        document.getElementById("dp-container") ||
-        document.getElementById("twister") ||
+        document.getElementById('dp-container') ||
+        document.getElementById('twister') ||
         document.body;
 
       this._mo?.disconnect?.();
-      this._mo = new MutationObserver(triggerPopulate);
+      this._mo = new MutationObserver(triggerCheck);
       this._mo.observe(root, {
         subtree: true,
         childList: true,
         attributes: true,
         attributeFilter: [
-          "class",
-          "aria-pressed",
-          "aria-checked",
-          "aria-label",
-          "data-defaultasin",
-          "data-asin",
-          "value"
+          'class',
+          'aria-pressed',
+          'aria-checked',
+          'aria-label',
+          'data-defaultasin',
+          'data-asin',
+          'value'
         ]
       });
 
-      let lastHref = location.href;
+      let last = location.href;
       setInterval(() => {
-        if (location.href !== lastHref) {
-          lastHref = location.href;
-          triggerPopulate();
+        if (location.href !== last) {
+          last = location.href;
+          triggerCheck();
         }
-      }, 700);
+      }, 800);
 
-      triggerPopulate();
+      triggerCheck();
     },
 
     _bindRuntimeMessage() {

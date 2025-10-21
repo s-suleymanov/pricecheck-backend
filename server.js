@@ -151,7 +151,7 @@ app.get('/v1/compare', async (req, res) => {
       SELECT
         'Amazon'::text AS store,
         v.asin,
-        NULL::text AS upc,
+        v.upc AS upc,
         v.amazon_price_cents AS price_cents,
         v.amazon_observed_at AS observed_at,
         NULL::text AS url,
