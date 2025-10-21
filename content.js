@@ -605,7 +605,7 @@
         const amazonRow = list.find(r => (r.store || "").toLowerCase() === "amazon");
         const brand = amazonRow?.brand || null;
         const category = amazonRow?.category || null;
-        const bc = [brand, category].filter(Boolean).join(" · ");
+        const bc = [brand, category].filter(Boolean).join(" ");
         bcEl.textContent = bc || "—";
       }
 
