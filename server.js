@@ -21,10 +21,9 @@ const pool = new Pool({
   ssl: { rejectUnauthorized: false }
 });
 
-// ----- helpers -----
+// ===== helpers =====
 
-// Normalize incoming keys from the extension as UPC.
-// digits only; if 13 digits and starts with 0, drop the 0 (EAN -> UPC).
+// Normalize incoming keys as UPC. Digits only. If 13 digits and starts with 0, drop it.
 function normalizeKeyAsUPC(key) {
   if (!key) return '';
   let k = String(key).replace(/[^0-9]/g, '');
@@ -32,9 +31,8 @@ function normalizeKeyAsUPC(key) {
   return k;
 }
 
-// SQL snippet that safely normalizes any SQL expression to comparable UPC text.
-// It casts parameters to text so Postgres does not leave them as unknown.
-const NORM_UPC_SQL = (expr) => `
+// Normalize a SQL column/expression to comparable UPC text.
+const NORM_UPC_COL = (expr) => `
   CASE
     WHEN (${expr}) IS NULL THEN NULL
     ELSE
@@ -47,12 +45,26 @@ const NORM_UPC_SQL = (expr) => `
   END
 `;
 
-app.get('/health', (_req, res) =>
-  res.json({ ok: true, version: 'v-upc-only' })
-);
+// Normalize a SQL parameter placeholder number (e.g. 2 -> $2) to comparable UPC text.
+const NORM_UPC_PARAM = (n) => `
+  CASE
+    WHEN ($${n}) IS NULL THEN NULL
+    ELSE
+      CASE
+        WHEN length(regexp_replace(btrim(($${n})::text), '[^0-9]', '', 'g')) = 13
+         AND left(regexp_replace(btrim(($${n})::text), '[^0-9]', '', 'g'), 1) = '0'
+          THEN substring(regexp_replace(btrim(($${n})::text), '[^0-9]', '', 'g') from 2)
+        ELSE regexp_replace(btrim(($${n})::text), '[^0-9]', '', 'g')
+      END
+  END
+`;
 
-// -------- Resolve: UPC -> ASIN --------
-// Query arg: store, store_key (interpreted as UPC for non-Amazon pages)
+app.get('/health', (_req, res) => {
+  res.json({ ok: true, version: 'v-upc-only-typed-params' });
+});
+
+// ===== Resolve: UPC -> ASIN =====
+// Query: store, store_key (interpreted as UPC)
 app.get('/v1/resolve', async (req, res) => {
   const store = String(req.query.store || '').trim();
   const upcKey = normalizeKeyAsUPC(req.query.store_key || '');
@@ -64,7 +76,7 @@ app.get('/v1/resolve', async (req, res) => {
       `SELECT l.asin, l.upc
          FROM public.listings l
         WHERE lower(btrim(l.store)) = lower(btrim($1))
-          AND ${NORM_UPC_SQL('l.upc')} = ${NORM_UPC_SQL('$2')}
+          AND ${NORM_UPC_COL('l.upc')} = ${NORM_UPC_PARAM(2)}
         ORDER BY l.current_price_observed_at DESC NULLS LAST, l.id DESC
         LIMIT 1`,
       [store, upcKey]
@@ -72,12 +84,12 @@ app.get('/v1/resolve', async (req, res) => {
     const l = rL.rows[0];
     if (!l) return res.json({ asin: null });
 
-    // Prefer mapping by UPC into asins
+    // Prefer mapping by UPC in asins
     if (l.upc) {
       const rA = await pool.query(
         `SELECT asin
            FROM public.asins
-          WHERE ${NORM_UPC_SQL('upc')} = ${NORM_UPC_SQL('$1')}
+          WHERE ${NORM_UPC_COL('upc')} = ${NORM_UPC_PARAM(1)}
             AND asin IS NOT NULL
           LIMIT 1`,
         [l.upc]
@@ -87,18 +99,16 @@ app.get('/v1/resolve', async (req, res) => {
       }
     }
 
-    // Fallback to listing.asin if present
+    // Fallback to listing.asin
     if (l.asin) return res.json({ asin: String(l.asin).toUpperCase() });
-
     return res.json({ asin: null });
   } catch (e) {
     console.error('resolve error:', e);
-    // Do not 500; return null to keep extension UX smooth
     return res.json({ asin: null });
   }
 });
 
-// -------- Compare: ASIN -> cross-store prices --------
+// ===== Compare: ASIN -> cross store prices =====
 app.get('/v1/compare', async (req, res) => {
   const asin = String(req.query.asin || '').trim().toUpperCase();
   if (!asin || !/^[A-Z0-9]{10}$/.test(asin)) return res.json({ results: [] });
@@ -124,8 +134,8 @@ app.get('/v1/compare', async (req, res) => {
                l.current_price_cents        AS price_cents,
                l.current_price_observed_at  AS observed_at
           FROM public.listings l
-          JOIN v ON ${NORM_UPC_SQL('v.upc')} IS NOT NULL
-                 AND ${NORM_UPC_SQL('l.upc')} = ${NORM_UPC_SQL('v.upc')}
+          JOIN v ON ${NORM_UPC_COL('v.upc')} IS NOT NULL
+                 AND ${NORM_UPC_COL('l.upc')} = ${NORM_UPC_COL('v.upc')}
       ),
       match_asin AS (
         SELECT l.store, l.upc, l.url,
@@ -140,7 +150,7 @@ app.get('/v1/compare', async (req, res) => {
         SELECT * FROM match_asin
         WHERE NOT EXISTS (SELECT 1 FROM match_upc LIMIT 1)
       )
-      -- Amazon row (only if it has a current price)
+      -- Amazon row if it has a price
       SELECT
         'Amazon'::text AS store,
         v.asin,
@@ -173,7 +183,6 @@ app.get('/v1/compare', async (req, res) => {
 
       ORDER BY price_cents ASC NULLS LAST, store ASC;
     `;
-
     const { rows } = await pool.query(sql, [asin]);
 
     res.json({
@@ -197,9 +206,8 @@ app.get('/v1/compare', async (req, res) => {
   }
 });
 
-// -------- Observe: record a price snapshot --------
-// For Amazon: require asin
-// For non-Amazon: require upc
+// ===== Observe: record a price snapshot =====
+// Amazon requires asin. Non Amazon requires upc.
 app.post('/v1/observe', async (req, res) => {
   const { store, asin, upc, price_cents, url, title, observed_at } = req.body || {};
 
@@ -235,12 +243,12 @@ app.post('/v1/observe', async (req, res) => {
     } else {
       if (!upcNorm) throw new Error('upc required for non Amazon stores');
 
-      // Update existing listing by (store, upc); else insert
+      // Update listing by (store, upc). If none, insert.
       const upd = await client.query(
         `UPDATE public.listings
             SET url = COALESCE($3, url), status = 'active'
           WHERE lower(btrim(store)) = lower(btrim($1))
-            AND ${NORM_UPC_SQL('upc')} = ${NORM_UPC_SQL('$2')}`,
+            AND ${NORM_UPC_COL('upc')} = ${NORM_UPC_PARAM(2)}`,
         [storeNorm, upcNorm, url || null]
       );
 
