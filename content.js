@@ -517,16 +517,26 @@
       };
       await safeSet({ lastSnapshot: snap });
 
+      // results
       const resultsEl = $("#ps-results");
       if (!resultsEl) return;
+
+      // Show "Searching..." only if we don't already have cards
+      const hadCards = !!resultsEl.querySelector(".result-card");
       let statusEl = resultsEl.querySelector(".status");
       if (!statusEl) {
         statusEl = document.createElement("div");
         statusEl.className = "status";
         resultsEl.prepend(statusEl);
       }
-      statusEl.style.display = "block";
-      statusEl.textContent = "Searching...";
+      if (hadCards) {
+        // Hide status during refresh; keep previous cards/variant visible
+        statusEl.style.display = "none";
+        statusEl.textContent = "";
+      } else {
+        statusEl.style.display = "block";
+        statusEl.textContent = "Searching...";
+      }
 
       // Build list via backend so we can also grab Brand/Category for the subheader
       let list = [];

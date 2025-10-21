@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "PriceCheck: Your All-in-One Shopping Assistant",
   "version": "0.8.4",
-  "description": "Compare prices across Amazon, Target, Walmart, and Best Buy. ASIN-first.",
+  "description": "PriceCheck instantly compares prices across stores to help you find the best deal.",
   "action": {},
   "permissions": ["scripting", "activeTab", "storage"],
   "host_permissions": [

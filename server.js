@@ -21,48 +21,45 @@ const pool = new Pool({
   ssl: { rejectUnauthorized: false }
 });
 
-// -------- helpers --------
+// ----- helpers -----
 
-// Normalize any UPC to digits only; if 13 digits and starts with 0, drop that 0 (EAN→UPC).
-const NORM_UPC_SQL = (expr) => `
-  CASE
-    WHEN ${expr} IS NULL THEN NULL
-    ELSE
-      CASE
-        WHEN length(regexp_replace(btrim(${expr}), '[^0-9]', '', 'g')) = 13
-         AND left(regexp_replace(btrim(${expr}), '[^0-9]', '', 'g'), 1) = '0'
-          THEN substring(regexp_replace(btrim(${expr}), '[^0-9]', '', 'g') from 2)
-        ELSE regexp_replace(btrim(${expr}), '[^0-9]', '', 'g')
-      END
-  END
-`;
-
-// For incoming keys from the extension. We now treat “store_key” as UPC.
+// Normalize incoming keys from the extension as UPC.
+// digits only; if 13 digits and starts with 0, drop the 0 (EAN -> UPC).
 function normalizeKeyAsUPC(key) {
   if (!key) return '';
-  // digits only
   let k = String(key).replace(/[^0-9]/g, '');
-  // if 13-digit starting with 0, drop it
   if (k.length === 13 && k.startsWith('0')) k = k.slice(1);
   return k;
 }
 
-app.get('/health', (_req, res) => res.json({ ok: true, version: 'v15-listings-upc-only' }));
+// SQL snippet that safely normalizes any SQL expression to comparable UPC text.
+// It casts parameters to text so Postgres does not leave them as unknown.
+const NORM_UPC_SQL = (expr) => `
+  CASE
+    WHEN (${expr}) IS NULL THEN NULL
+    ELSE
+      CASE
+        WHEN length(regexp_replace(btrim((${expr})::text), '[^0-9]', '', 'g')) = 13
+         AND left(regexp_replace(btrim((${expr})::text), '[^0-9]', '', 'g'), 1) = '0'
+          THEN substring(regexp_replace(btrim((${expr})::text), '[^0-9]', '', 'g') from 2)
+        ELSE regexp_replace(btrim((${expr})::text), '[^0-9]', '', 'g')
+      END
+  END
+`;
 
-/**
- * GET /v1/resolve?store=Target&store_key=<UPC or whatever the page gave>
- * Returns { asin: "B0XXXXXXXXX" | null }
- * Logic:
- *  1) Find listing by (store, upc) — we treat store_key as UPC now.
- *  2) If listing.upc maps to an asins.upc, return that ASIN.
- *  3) Else fall back to listing.asin if it exists.
- */
+app.get('/health', (_req, res) =>
+  res.json({ ok: true, version: 'v-upc-only' })
+);
+
+// -------- Resolve: UPC -> ASIN --------
+// Query arg: store, store_key (interpreted as UPC for non-Amazon pages)
 app.get('/v1/resolve', async (req, res) => {
   const store = String(req.query.store || '').trim();
   const upcKey = normalizeKeyAsUPC(req.query.store_key || '');
   if (!store || !upcKey) return res.json({ asin: null });
 
   try {
+    // Find latest listing by (store, normalized upc)
     const rL = await pool.query(
       `SELECT l.asin, l.upc
          FROM public.listings l
@@ -75,6 +72,7 @@ app.get('/v1/resolve', async (req, res) => {
     const l = rL.rows[0];
     if (!l) return res.json({ asin: null });
 
+    // Prefer mapping by UPC into asins
     if (l.upc) {
       const rA = await pool.query(
         `SELECT asin
@@ -89,23 +87,18 @@ app.get('/v1/resolve', async (req, res) => {
       }
     }
 
+    // Fallback to listing.asin if present
     if (l.asin) return res.json({ asin: String(l.asin).toUpperCase() });
+
     return res.json({ asin: null });
   } catch (e) {
     console.error('resolve error:', e);
+    // Do not 500; return null to keep extension UX smooth
     return res.json({ asin: null });
   }
 });
 
-/**
- * GET /v1/compare?asin=B0XXXXXXXXX
- * Returns { results: [...] }
- * Logic:
- *  1) Look up that ASIN in asins; get its UPC (+ product info).
- *  2) First, match listings by UPC (listings.upc).
- *  3) If none, fall back to match listings by ASIN (case-insensitive).
- *  4) Include Amazon row only if asins.current_price_cents is set.
- */
+// -------- Compare: ASIN -> cross-store prices --------
 app.get('/v1/compare', async (req, res) => {
   const asin = String(req.query.asin || '').trim().toUpperCase();
   if (!asin || !/^[A-Z0-9]{10}$/.test(asin)) return res.json({ results: [] });
@@ -147,7 +140,7 @@ app.get('/v1/compare', async (req, res) => {
         SELECT * FROM match_asin
         WHERE NOT EXISTS (SELECT 1 FROM match_upc LIMIT 1)
       )
-      -- Amazon (only if it has a current price)
+      -- Amazon row (only if it has a current price)
       SELECT
         'Amazon'::text AS store,
         v.asin,
@@ -190,8 +183,8 @@ app.get('/v1/compare', async (req, res) => {
         price_cents: r.price_cents,
         url: r.url,
         currency: 'USD',
-        asin: r.asin,       // from SELECT layout above
-        upc: r.upc ?? null, // for non-Amazon rows
+        asin: r.asin,
+        upc: r.upc ?? null,
         seen_at: r.observed_at,
         brand: r.brand || null,
         category: r.category || null,
@@ -204,12 +197,9 @@ app.get('/v1/compare', async (req, res) => {
   }
 });
 
-/**
- * POST /v1/observe
- * Body: { store, asin?, upc?, price_cents, url?, title?, observed_at? }
- * NOTE: since listings no longer has store_sku, we treat the provided "upc" as the unique key with store.
- * We still write the UPC into price_history.store_sku so your trigger can read it.
- */
+// -------- Observe: record a price snapshot --------
+// For Amazon: require asin
+// For non-Amazon: require upc
 app.post('/v1/observe', async (req, res) => {
   const { store, asin, upc, price_cents, url, title, observed_at } = req.body || {};
 
@@ -245,7 +235,7 @@ app.post('/v1/observe', async (req, res) => {
     } else {
       if (!upcNorm) throw new Error('upc required for non Amazon stores');
 
-      // Upsert listing by (store, upc). No unique constraint? Do UPDATE..INSERT pattern.
+      // Update existing listing by (store, upc); else insert
       const upd = await client.query(
         `UPDATE public.listings
             SET url = COALESCE($3, url), status = 'active'
@@ -262,9 +252,9 @@ app.post('/v1/observe', async (req, res) => {
         );
       }
 
-      // Write observation; IMPORTANT: put UPC in price_history.store_sku so the trigger can match
+      // Write price history row with UPC
       await client.query(
-        `INSERT INTO public.price_history (store, store_sku, price_cents, observed_at, url, title)
+        `INSERT INTO public.price_history (store, upc, price_cents, observed_at, url, title)
          VALUES ($1, $2, $3, COALESCE($4::timestamptz, now()), $5, $6)`,
         [storeNorm, upcNorm, cents, observed_at || null, url || null, title || null]
       );
