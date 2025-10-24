@@ -77,6 +77,107 @@ app.get('/v1/resolve', async (req, res) => {
   }
 });
 
+// ===== Compare by UPC: store + upc -> asin + results (single round-trip)
+app.get('/v1/compare_by_upc', async (req, res) => {
+  const store = String(req.query.store || '').trim();
+  const upcRaw = String(req.query.upc || '').replace(/[^0-9]/g, '');
+  const upcNorm = (upcRaw.length === 13 && upcRaw.startsWith('0')) ? upcRaw.slice(1) : upcRaw;
+
+  if (!store || !upcNorm) return res.json({ asin: null, results: [] });
+
+  try {
+    const sql = `
+      WITH v AS (
+        SELECT a.asin,
+               a.upc,
+               a.variant_label,
+               a.current_price_cents        AS amazon_price_cents,
+               a.current_price_observed_at  AS amazon_observed_at,
+               p.title                      AS product_title,
+               p.brand,
+               p.category
+          FROM public.asins a
+          LEFT JOIN public.products p ON p.id = a.product_id
+         WHERE public.norm_upc(a.upc) = public.norm_upc($1::text)
+         LIMIT 1
+      ),
+      match_upc AS (
+        SELECT l.store, l.upc, l.url,
+               l.current_price_cents        AS price_cents,
+               l.current_price_observed_at  AS observed_at
+          FROM public.listings l
+          JOIN v ON public.norm_upc(v.upc) IS NOT NULL
+                 AND public.norm_upc(l.upc) = public.norm_upc(v.upc)
+      ),
+      match_asin AS (
+        SELECT l.store, l.upc, l.url,
+               l.current_price_cents        AS price_cents,
+               l.current_price_observed_at  AS observed_at
+          FROM public.listings l
+          JOIN v ON upper(l.asin) = v.asin
+      ),
+      chosen AS (
+        SELECT * FROM match_upc
+        UNION ALL
+        SELECT * FROM match_asin
+        WHERE NOT EXISTS (SELECT 1 FROM match_upc LIMIT 1)
+      )
+      SELECT
+        'Amazon'::text AS store,
+        v.asin,
+        v.upc AS upc,
+        v.amazon_price_cents AS price_cents,
+        v.amazon_observed_at AS observed_at,
+        NULL::text AS url,
+        v.product_title AS title,
+        v.brand,
+        v.category,
+        v.variant_label
+      FROM v
+
+      UNION ALL
+
+      SELECT
+        c.store,
+        (SELECT asin FROM v),
+        c.upc,
+        c.price_cents,
+        c.observed_at,
+        c.url,
+        (SELECT product_title FROM v) AS title,
+        NULL::text AS brand,
+        NULL::text AS category,
+        NULL::text AS variant_label
+      FROM chosen c
+
+      ORDER BY price_cents ASC NULLS LAST, store ASC
+    `;
+    const { rows } = await pool.query(sql, [upcNorm]);
+
+    const asin = rows.find(r => r.store === 'Amazon')?.asin || null;
+    res.json({
+      asin: asin ? String(asin).toUpperCase() : null,
+      results: rows.map(r => ({
+        store: r.store,
+        product_name: r.title || '',
+        price_cents: r.price_cents,
+        url: r.url,
+        currency: 'USD',
+        asin: r.asin,
+        upc: r.upc ?? null,
+        seen_at: r.observed_at,
+        brand: r.brand || null,
+        category: r.category || null,
+        variant_label: r.variant_label || null
+      }))
+    });
+  } catch (err) {
+    console.error('compare_by_upc error:', err);
+    res.status(500).json({ asin: null, results: [] });
+  }
+});
+
+
 // ===== Compare: ASIN -> cross-store prices =====
 app.get('/v1/compare', async (req, res) => {
   const asin = String(req.query.asin || '').trim().toUpperCase();

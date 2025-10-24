@@ -27,8 +27,8 @@
   const siteOf = (h = location.hostname) => {
     if (/amazon\./i.test(h)) return "amazon";
     if (/target\.com$/i.test(h) || /\.target\.com$/i.test(h)) return "target";
-    if (/walmart\.com$/i.test(h) || /\.walmart\.com$/i.test(h)) return "walmart";
-    if (/bestbuy\.com$/i.test(h) || /\.bestbuy\.com$/i.test(h)) return "bestbuy";
+    if (/walmart\./i.test(h)) return "walmart";
+    if (/bestbuy\./i.test(h)) return "bestbuy";
     return "unknown";
   };
 
@@ -47,23 +47,21 @@
 
   // ---------- robust Amazon price ----------
   function getAmazonPriceCents() {
-    // Preferred: price to pay
     const pref = document.querySelector(".priceToPay .a-offscreen");
     if (pref?.innerText) {
       const v = toCents(pref.innerText);
       if (Number.isFinite(v)) return v;
     }
-    // Fallbacks: any a-offscreen that is NOT inside strikethrough/list/was-price containers
     const nodes = Array.from(document.querySelectorAll(".a-price .a-offscreen, [data-a-color='price'] .a-offscreen, #corePrice_feature_div .a-offscreen"));
     for (const el of nodes) {
       if (!el?.innerText) continue;
-      // skip crossed-out/compare prices
+      // skip crossed-out or MSRP
       let bad = false;
       let p = el;
       for (let i = 0; i < 4 && p; i++) {
         if (
-          p.classList?.contains("a-text-price") ||            // strikethrough
-          p.classList?.contains("basisPrice")   ||            // list MSRP
+          p.classList?.contains("a-text-price") ||
+          p.classList?.contains("basisPrice") ||
           p.getAttribute?.("data-a-strike") === "true"
         ) { bad = true; break; }
         p = p.parentElement;
@@ -92,12 +90,9 @@
         );
       },
       getVariantLabel() {
-        const cleanTxt = (t) => String(t || "")
-          .replace(/\s+/g, " ")
-          .replace(/^\s*(Select|Choose)\b.*$/i, "")
-          .trim();
-
+        const cleanTxt = (t) => String(t || "").replace(/\s+/g, " ").replace(/^\s*(Select|Choose)\b.*$/i, "").trim();
         const picks = new Set();
+
         const btnSelectors = [
           "#twister .a-button-selected .a-button-text",
           "#inline-twister-expander-content .a-button-selected .a-button-text",
@@ -145,81 +140,10 @@
         const domOut = Array.from(picks).filter(Boolean);
         if (domOut.length) return domOut.join(" ");
 
-        function tryParseWholeJSON(text) {
-          const s = (text || "").trim();
-          if ((s.startsWith("{") && s.endsWith("}")) || (s.startsWith("[") && s.endsWith("]"))) {
-            try { return JSON.parse(s); } catch { return null; }
-          }
-          return null;
-        }
-        function extractObjectForKey(text, key) {
-          const idx = text.indexOf(key);
-          if (idx === -1) return null;
-          let i = text.indexOf("{", idx);
-          if (i === -1) return null;
-          let depth = 0, start = i, end = -1, inStr = false, esc = false;
-          for (; i < text.length; i++) {
-            const ch = text[i];
-            if (inStr) {
-              if (esc) esc = false;
-              else if (ch === "\\") esc = true;
-              else if (ch === '"') inStr = false;
-            } else {
-              if (ch === '"') inStr = true;
-              else if (ch === "{") depth++;
-              else if (ch === "}") { depth--; if (depth === 0) { end = i; break; } }
-            }
-          }
-          if (start >= 0 && end > start) {
-            try { return JSON.parse(text.slice(start, end + 1)); } catch { return null; }
-          }
-          return null;
-        }
-
-        let variationValues = null;
-        let selectedVariationValues = null;
-
-        for (const sc of document.querySelectorAll("script")) {
-          const text = sc.textContent || "";
-          if (!variationValues && text.includes('"variationValues"')) {
-            const whole = tryParseWholeJSON(text);
-            if (whole?.variationValues && typeof whole.variationValues === "object") {
-              variationValues = whole.variationValues;
-            } else {
-              const obj = extractObjectForKey(text, '"variationValues"');
-              if (obj && typeof obj === "object") variationValues = obj;
-            }
-          }
-          if (!selectedVariationValues && text.includes('"selectedVariationValues"')) {
-            const whole = tryParseWholeJSON(text);
-            if (whole?.selectedVariationValues && typeof whole.selectedVariationValues === "object") {
-              selectedVariationValues = whole.selectedVariationValues;
-            } else {
-              const obj = extractObjectForKey(text, '"selectedVariationValues"');
-              if (obj && typeof obj === "object") selectedVariationValues = obj;
-            }
-          }
-          if (variationValues && selectedVariationValues) break;
-        }
-
-        if (variationValues && selectedVariationValues) {
-          const out = [];
-          for (const dim of Object.keys(variationValues)) {
-            const arr = variationValues[dim];
-            const idx = parseInt(selectedVariationValues[dim], 10);
-            if (Array.isArray(arr) && arr.length > 0 && Number.isFinite(idx)) {
-              const val = String(arr[idx] ?? "").trim();
-              if (val) out.push(val);
-            }
-          }
-          if (out.length) return out.join(" ");
-        }
-
+        // If DOM fails, return empty. Keep it simple and stable.
         return "";
       },
-      getPriceCents() {
-        return getAmazonPriceCents();
-      },
+      getPriceCents() { return getAmazonPriceCents(); },
       getASIN() {
         const fromUrl = location.pathname.match(/(?:dp|gp\/product)\/([A-Z0-9]{10})(?:[/?]|$)/i)?.[1];
         const fromAttr = document.querySelector("[data-asin]")?.getAttribute("data-asin");
@@ -231,7 +155,9 @@
 
     target: {
       store: "Target",
-      getTitle() { return clean(document.querySelector('h1[data-test="product-title"]')?.innerText || document.title); },
+      getTitle() {
+        return clean(document.querySelector('h1[data-test="product-title"]')?.innerText || document.title);
+      },
       getPriceCents() {
         const sels = [
           '[data-test="product-price"]',
@@ -248,26 +174,44 @@
         return null;
       },
       getASIN() { return null; },
-      getStoreKey() {
-        const mPath = location.pathname.match(/\/A-([0-9A-Z]+)/i)?.[1];
-        const mMeta = document.querySelector('meta[name="twitter:app:url:iphone"]')?.content?.match(/\/A-([0-9A-Z]+)/i)?.[1];
-        const mText = document.body.innerText.match(/\bTCIN\s*[:#]?\s*([0-9A-Z]{5,})/i)?.[1];
-        const tcinRaw = mPath || mMeta || mText || null;
-        if (tcinRaw) return normalizeStoreKey("Target", tcinRaw);
 
+      // Return UPC only. If none found, return null.
+      getStoreKey() {
+        // 1) Structured ld+json: gtin12 or gtin13
         for (const s of document.querySelectorAll('script[type="application/ld+json"]')) {
           try {
             const j = JSON.parse(s.textContent.trim());
-            const gtin = j?.gtin13 || j?.gtin12 || j?.sku;
+            const gtin = j?.gtin12 || j?.gtin13;
             if (gtin && /^\d{12,13}$/.test(gtin)) {
               return gtin.length === 13 && gtin.startsWith("0") ? gtin.slice(1) : gtin;
             }
           } catch {}
         }
+        // 2) Specs panel: look for UPC label near a 12- or 13-digit number
+        const specsRoots = [
+          '[data-test="item-details-specifications"]',
+          '[data-test="specifications"]',
+          '#specAndDescript'
+        ];
+        for (const sel of specsRoots) {
+          const root = document.querySelector(sel);
+          if (!root) continue;
+          const txt = root.innerText || "";
+          const m = txt.match(/UPC\s*(?:#|:)?\s*(\d{12,13})/i);
+          if (m) {
+            const code = m[1];
+            return code.length === 13 && code.startsWith("0") ? code.slice(1) : code;
+          }
+        }
+        // 3) Full page fallback: first obvious 12-13 digit code
         const m = document.body.innerText.match(/(^|[^\d])(\d{12,13})(?!\d)/);
-        if (m) return m[2].length === 13 && m[2].startsWith("0") ? m[2].slice(1) : m[2];
+        if (m) {
+          const code = m[2];
+          return code.length === 13 && code.startsWith("0") ? code.slice(1) : code;
+        }
         return null;
       },
+
       productKey() { return `${this.getStoreKey() || ""}|${location.pathname}`; }
     },
 
@@ -462,11 +406,19 @@
           varEl.style.display = newVar ? '' : 'none';
         }
 
-        // link
-        if (p.url && el.href !== p.url) {
-          el.href = p.url;
-          el.target = '_blank';
-          el.rel = 'noopener noreferrer';
+        // link — prefer DP URL if Amazon + ASIN, else use provided URL
+        const finalUrl = ((p.store || "").toLowerCase() === "amazon" && p.asin && /^[A-Z0-9]{10}$/.test(String(p.asin)))
+          ? `https://www.amazon.com/dp/${String(p.asin).toUpperCase()}`
+          : (p.url || "");
+
+        if (finalUrl) {
+          if (el.href !== finalUrl) el.href = finalUrl;
+          el.target = "_blank";
+          el.rel = "noopener noreferrer";
+        } else {
+          el.removeAttribute("href");
+          el.removeAttribute("target");
+          el.removeAttribute("rel");
         }
       }
 
@@ -476,8 +428,16 @@
         const item = document.createElement("a");
         item.className = "result-card";
         item.dataset.key = k;
-        if (p.url) { item.href = p.url; item.target = '_blank'; item.rel = 'noopener noreferrer'; }
-        else item.href = '#';
+
+        const finalUrl = ((p.store || "").toLowerCase() === "amazon" && p.asin && /^[A-Z0-9]{10}$/.test(String(p.asin)))
+          ? `https://www.amazon.com/dp/${String(p.asin).toUpperCase()}`
+          : (p.url || "");
+
+        if (finalUrl) {
+          item.href = finalUrl;
+          item.target = "_blank";
+          item.rel = "noopener noreferrer";
+        }
 
         const price = Number.isFinite(p.price_cents) ? (p.price_cents / 100).toFixed(2) : "";
         const storeKey = (p.store || "default").toLowerCase();
@@ -521,7 +481,7 @@
       const resultsEl = $("#ps-results");
       if (!resultsEl) return;
 
-      // Show "Searching..." only if we don't already have cards
+      // Show "Searching..." only if we do not already have cards
       const hadCards = !!resultsEl.querySelector(".result-card");
       let statusEl = resultsEl.querySelector(".status");
       if (!statusEl) {
@@ -530,7 +490,6 @@
         resultsEl.prepend(statusEl);
       }
       if (hadCards) {
-        // Hide status during refresh; keep previous cards/variant visible
         statusEl.style.display = "none";
         statusEl.textContent = "";
       } else {
@@ -538,7 +497,7 @@
         statusEl.textContent = "Searching...";
       }
 
-      // Build list via backend so we can also grab Brand/Category for the subheader
+      // Build list via backend to also get Brand and Category
       let list = [];
       let resolvedASIN = snap.asin;
 
@@ -563,9 +522,6 @@
           payload: { store: D.store, store_key: snap.store_key || "", title: snap.title }
         });
         resolvedASIN = resp?.asin || null;
-
-        const asinEl = sh.querySelector("#ps-asin-val");
-        if (asinEl) asinEl.textContent = resolvedASIN || "Unknown";
 
         list = Array.isArray(resp?.results) ? resp.results.slice() : [];
 
@@ -592,7 +548,8 @@
             product_name: snap.title || "View on Amazon",
             price_cents: null,
             url: `https://www.amazon.com/dp/${resolvedASIN}`,
-            variant_label: null
+            variant_label: null,
+            asin: resolvedASIN
           });
         }
         if (!resolvedASIN) {
@@ -607,7 +564,7 @@
         }
       }
 
-      // Subheader: ASIN + Brand · Category (from DB via compare results)
+      // Subheader: ASIN + Brand · Category
       const asinEl = sh.querySelector("#ps-asin-val");
       if (asinEl) asinEl.textContent = resolvedASIN || snap.asin || (site === "amazon" ? "Not found" : "Resolving...");
       const bcEl = sh.querySelector("#ps-variant-val"); // reused to show Brand · Category
@@ -616,35 +573,46 @@
         const brand = amazonRow?.brand || null;
         const category = amazonRow?.category || null;
         const bc = [brand, category].filter(Boolean).join(" ");
-        bcEl.textContent = bc || "—";
+        bcEl.textContent = bc || "N/A";
       }
 
+      // Observe to DB
       if (site === "amazon") {
-      const payload = {
-        store: "Amazon",
-        asin: snap.asin || null,
-        price_cents: snap.price_cents,
-        url: location.href,
-        title: snap.title
-      };
-      try { await safeSend({ type: "OBSERVE_PRICE", payload }); } catch {}
-    } else if (snap.store_key) { // store_key must be UPC now
-      const payload = {
-        store: D.store,
-        upc: snap.store_key,       // <— this is the fix
-        price_cents: snap.price_cents,
-        url: location.href,
-        title: snap.title
-      };
-      try { await safeSend({ type: "OBSERVE_PRICE", payload }); } catch {}
-    }
-    // else: no UPC found on page, do not call observe to avoid the error
-
+        const payload = {
+          store: "Amazon",
+          asin: snap.asin || null,
+          price_cents: snap.price_cents,
+          url: location.href,
+          title: snap.title
+        };
+        try { await safeSend({ type: "OBSERVE_PRICE", payload }); } catch {}
+      } else if (snap.store_key) { // non-Amazon must have UPC
+        const payload = {
+          store: D.store,
+          upc: snap.store_key,
+          price_cents: snap.price_cents,
+          url: location.href,
+          title: snap.title
+        };
+        try { await safeSend({ type: "OBSERVE_PRICE", payload }); } catch {}
+      }
 
       if (!list.length) {
         statusEl.textContent = "No prices found.";
         statusEl.style.display = "block";
         return;
+      }
+
+      // Always ensure Amazon rows have a DP URL when we know an ASIN
+      const asinForLink = String((resolvedASIN || snap.asin || "")).toUpperCase();
+      if (/^[A-Z0-9]{10}$/.test(asinForLink)) {
+        list = list.map(r => {
+          if ((r.store || "").toLowerCase() === "amazon") {
+            r.asin = asinForLink;
+            r.url  = `https://www.amazon.com/dp/${asinForLink}`;
+          }
+          return r;
+        });
       }
 
       list.sort((a, b) => (a.price_cents ?? Infinity) - (b.price_cents ?? Infinity));

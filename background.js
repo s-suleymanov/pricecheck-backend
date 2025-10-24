@@ -23,6 +23,18 @@ async function fetchJSON(url, opts) {
   }
 }
 
+const REQUEST_TIMEOUT_MS = 8000; // keep
+async function apiCompareByUPC(store, upc) {
+  const qs = new URLSearchParams({ store, upc }).toString();
+  for (const base of API_BASES) {
+    const url = `${base.replace(/\/+$/, '')}/v1/compare_by_upc?${qs}`;
+    const data = await fetchJSON(url);
+    if (data && Array.isArray(data.results)) return data;
+  }
+  return { asin: null, results: [] };
+}
+
+
 async function apiCompareByASIN(asin) {
   const qs = new URLSearchParams({ asin }).toString();
   for (const base of API_BASES) {
@@ -81,16 +93,22 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     return true;
   }
 
-  if (msg?.type === 'RESOLVE_COMPARE_REQUEST') {
-    (async () => {
-      const { store, store_key, title } = msg.payload || {};
+if (msg?.type === 'RESOLVE_COMPARE_REQUEST') {
+  (async () => {
+    const { store, store_key, title } = msg.payload || {};
+    // Try UPC one-shot first (fast path)
+    let data = await apiCompareByUPC(store, store_key || '');
+    if (!data?.asin) {
+      // Fallback to the old 2-step path
       const r = await apiResolve({ store, store_key, title });
       if (!r?.asin) return sendResponse({ results: [], asin: null });
       const c = await apiCompareByASIN(r.asin);
-      sendResponse({ results: c.results || [], asin: r.asin });
-    })();
-    return true;
-  }
+      return sendResponse({ results: c.results || [], asin: r.asin });
+    }
+    sendResponse({ results: data.results || [], asin: data.asin || null });
+  })();
+  return true;
+}
 
   // New: record a price observation into backend
   if (msg?.type === 'OBSERVE_PRICE') {
