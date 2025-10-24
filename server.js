@@ -30,59 +30,13 @@ function normalizeKeyAsUPC(key) {
 }
 
 app.get('/health', (_req, res) =>
-  res.json({ ok: true, version: 'v-upc-only-cast-params' })
+  res.json({ ok: true, version: 'v-fast-compare-only' })
 );
 
-// ===== Resolve: UPC -> ASIN =====
-app.get('/v1/resolve', async (req, res) => {
-  const store = String(req.query.store || '').trim();
-  const upcKey = normalizeKeyAsUPC(req.query.store_key || '');
-  if (!store || !upcKey) return res.json({ asin: null });
-
-  try {
-    // Find latest listing by (store, normalized upc)
-    const rL = await pool.query(
-      `SELECT l.asin, l.upc
-         FROM public.listings l
-        WHERE lower(btrim(l.store)) = lower(btrim($1::text))
-          AND public.norm_upc(l.upc) = public.norm_upc($2::text)
-        ORDER BY l.current_price_observed_at DESC NULLS LAST, l.id DESC
-        LIMIT 1`,
-      [store, upcKey]
-    );
-    const l = rL.rows[0];
-    if (!l) return res.json({ asin: null });
-
-    // Prefer mapping by UPC into asins
-    if (l.upc) {
-      const rA = await pool.query(
-        `SELECT asin
-           FROM public.asins
-          WHERE public.norm_upc(upc) = public.norm_upc($1::text)
-            AND asin IS NOT NULL
-          LIMIT 1`,
-        [l.upc]
-      );
-      if (rA.rows[0]?.asin) {
-        return res.json({ asin: String(rA.rows[0].asin).toUpperCase() });
-      }
-    }
-
-    // Fallback to listing.asin if present
-    if (l.asin) return res.json({ asin: String(l.asin).toUpperCase() });
-    return res.json({ asin: null });
-  } catch (e) {
-    console.error('resolve error:', e);
-    return res.json({ asin: null });
-  }
-});
-
-// ===== Compare by UPC: store + upc -> asin + results (single round-trip)
+// ===== Compare by UPC: single hop, index-friendly
 app.get('/v1/compare_by_upc', async (req, res) => {
   const store = String(req.query.store || '').trim();
-  const upcRaw = String(req.query.upc || '').replace(/[^0-9]/g, '');
-  const upcNorm = (upcRaw.length === 13 && upcRaw.startsWith('0')) ? upcRaw.slice(1) : upcRaw;
-
+  const upcNorm = normalizeKeyAsUPC(req.query.upc || '');
   if (!store || !upcNorm) return res.json({ asin: null, results: [] });
 
   try {
@@ -90,70 +44,46 @@ app.get('/v1/compare_by_upc', async (req, res) => {
       WITH v AS (
         SELECT a.asin,
                a.upc,
-               a.variant_label,
                a.current_price_cents        AS amazon_price_cents,
                a.current_price_observed_at  AS amazon_observed_at,
                p.title                      AS product_title,
-               p.brand,
-               p.category
+               p.brand, p.category
           FROM public.asins a
           LEFT JOIN public.products p ON p.id = a.product_id
          WHERE public.norm_upc(a.upc) = public.norm_upc($1::text)
          LIMIT 1
       ),
-      match_upc AS (
+      xs AS (
         SELECT l.store, l.upc, l.url,
-               l.current_price_cents        AS price_cents,
-               l.current_price_observed_at  AS observed_at
+               l.current_price_cents AS price_cents,
+               l.current_price_observed_at AS observed_at
           FROM public.listings l
-          JOIN v ON public.norm_upc(v.upc) IS NOT NULL
-                 AND public.norm_upc(l.upc) = public.norm_upc(v.upc)
-      ),
-      match_asin AS (
-        SELECT l.store, l.upc, l.url,
-               l.current_price_cents        AS price_cents,
-               l.current_price_observed_at  AS observed_at
-          FROM public.listings l
-          JOIN v ON upper(l.asin) = v.asin
-      ),
-      chosen AS (
-        SELECT * FROM match_upc
-        UNION ALL
-        SELECT * FROM match_asin
-        WHERE NOT EXISTS (SELECT 1 FROM match_upc LIMIT 1)
+         WHERE public.norm_upc(l.upc) = public.norm_upc($1::text)
       )
       SELECT
         'Amazon'::text AS store,
-        v.asin,
-        v.upc AS upc,
+        v.asin, v.upc,
         v.amazon_price_cents AS price_cents,
         v.amazon_observed_at AS observed_at,
         NULL::text AS url,
         v.product_title AS title,
-        v.brand,
-        v.category,
-        v.variant_label
+        v.brand, v.category
       FROM v
+      WHERE v.amazon_price_cents IS NOT NULL
 
       UNION ALL
 
       SELECT
-        c.store,
-        (SELECT asin FROM v),
-        c.upc,
-        c.price_cents,
-        c.observed_at,
-        c.url,
-        (SELECT product_title FROM v) AS title,
-        NULL::text AS brand,
-        NULL::text AS category,
-        NULL::text AS variant_label
-      FROM chosen c
+        xs.store,
+        (SELECT asin FROM v), xs.upc,
+        xs.price_cents, xs.observed_at, xs.url,
+        (SELECT product_title FROM v),
+        NULL::text, NULL::text
+      FROM xs
 
-      ORDER BY price_cents ASC NULLS LAST, store ASC
+      ORDER BY price_cents ASC NULLS LAST, store ASC;
     `;
     const { rows } = await pool.query(sql, [upcNorm]);
-
     const asin = rows.find(r => r.store === 'Amazon')?.asin || null;
     res.json({
       asin: asin ? String(asin).toUpperCase() : null,
@@ -167,8 +97,7 @@ app.get('/v1/compare_by_upc', async (req, res) => {
         upc: r.upc ?? null,
         seen_at: r.observed_at,
         brand: r.brand || null,
-        category: r.category || null,
-        variant_label: r.variant_label || null
+        category: r.category || null
       }))
     });
   } catch (err) {
@@ -177,8 +106,7 @@ app.get('/v1/compare_by_upc', async (req, res) => {
   }
 });
 
-
-// ===== Compare: ASIN -> cross-store prices =====
+// ===== Compare: ASIN -> cross-store prices (fast)
 app.get('/v1/compare', async (req, res) => {
   const asin = String(req.query.asin || '').trim().toUpperCase();
   if (!asin || !/^[A-Z0-9]{10}$/.test(asin)) return res.json({ results: [] });
@@ -188,12 +116,10 @@ app.get('/v1/compare', async (req, res) => {
       WITH v AS (
         SELECT a.asin,
                a.upc,
-               a.variant_label,
                a.current_price_cents        AS amazon_price_cents,
                a.current_price_observed_at  AS amazon_observed_at,
                p.title                      AS product_title,
-               p.brand,
-               p.category
+               p.brand, p.category
           FROM public.asins a
           LEFT JOIN public.products p ON p.id = a.product_id
          WHERE upper(a.asin) = $1::text
@@ -201,16 +127,15 @@ app.get('/v1/compare', async (req, res) => {
       ),
       match_upc AS (
         SELECT l.store, l.upc, l.url,
-               l.current_price_cents        AS price_cents,
-               l.current_price_observed_at  AS observed_at
+               l.current_price_cents AS price_cents,
+               l.current_price_observed_at AS observed_at
           FROM public.listings l
-          JOIN v ON public.norm_upc(v.upc) IS NOT NULL
-                 AND public.norm_upc(l.upc) = public.norm_upc(v.upc)
+          JOIN v ON public.norm_upc(l.upc) = public.norm_upc(v.upc)
       ),
       match_asin AS (
         SELECT l.store, l.upc, l.url,
-               l.current_price_cents        AS price_cents,
-               l.current_price_observed_at  AS observed_at
+               l.current_price_cents AS price_cents,
+               l.current_price_observed_at AS observed_at
           FROM public.listings l
           JOIN v ON upper(l.asin) = v.asin
       ),
@@ -220,41 +145,30 @@ app.get('/v1/compare', async (req, res) => {
         SELECT * FROM match_asin
         WHERE NOT EXISTS (SELECT 1 FROM match_upc LIMIT 1)
       )
-      -- Amazon row (only if it has a current price)
       SELECT
         'Amazon'::text AS store,
-        v.asin,
-        v.upc AS upc,
+        v.asin, v.upc,
         v.amazon_price_cents AS price_cents,
         v.amazon_observed_at AS observed_at,
         NULL::text AS url,
         v.product_title AS title,
-        v.brand,
-        v.category,
-        v.variant_label
+        v.brand, v.category
       FROM v
       WHERE v.amazon_price_cents IS NOT NULL
 
       UNION ALL
 
-      -- Other stores
       SELECT
         c.store,
-        (SELECT asin FROM v),
-        c.upc,
-        c.price_cents,
-        c.observed_at,
-        c.url,
-        (SELECT product_title FROM v) AS title,
-        NULL::text AS brand,
-        NULL::text AS category,
-        NULL::text AS variant_label
+        (SELECT asin FROM v), c.upc,
+        c.price_cents, c.observed_at, c.url,
+        (SELECT product_title FROM v),
+        NULL::text, NULL::text
       FROM chosen c
 
       ORDER BY price_cents ASC NULLS LAST, store ASC;
     `;
     const { rows } = await pool.query(sql, [asin]);
-
     res.json({
       results: rows.map(r => ({
         store: r.store,
@@ -266,8 +180,7 @@ app.get('/v1/compare', async (req, res) => {
         upc: r.upc ?? null,
         seen_at: r.observed_at,
         brand: r.brand || null,
-        category: r.category || null,
-        variant_label: r.variant_label || null
+        category: r.category || null
       }))
     });
   } catch (err) {
@@ -276,10 +189,9 @@ app.get('/v1/compare', async (req, res) => {
   }
 });
 
-// ===== Observe: record a price snapshot =====
+// ===== Observe: price snapshot (unchanged, minimal)
 app.post('/v1/observe', async (req, res) => {
   const { store, asin, upc, price_cents, url, title, observed_at } = req.body || {};
-
   const storeNorm = String(store || '').trim();
   const upcNorm = normalizeKeyAsUPC(upc || null);
   const cents = Number.isFinite(price_cents) ? price_cents : null;
@@ -312,7 +224,6 @@ app.post('/v1/observe', async (req, res) => {
     } else {
       if (!upcNorm) throw new Error('upc required for non Amazon stores');
 
-      // Update listing by (store, upc). If none, insert.
       const upd = await client.query(
         `UPDATE public.listings
             SET url = COALESCE($3::text, url), status = 'active'
@@ -329,7 +240,6 @@ app.post('/v1/observe', async (req, res) => {
         );
       }
 
-      // Write price history row with UPC
       await client.query(
         `INSERT INTO public.price_history (store, upc, price_cents, observed_at, url, title)
          VALUES ($1::text, $2::text, $3, COALESCE($4::timestamptz, now()), $5::text, $6::text)`,
@@ -348,10 +258,7 @@ app.post('/v1/observe', async (req, res) => {
   }
 });
 
-// Start
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, '0.0.0.0', () => console.log(`API listening on ${PORT}`));
-
-// Shutdown
 process.on('SIGINT', async () => { try { await pool.end(); } finally { process.exit(0); } });
 process.on('SIGTERM', async () => { try { await pool.end(); } finally { process.exit(0); } });

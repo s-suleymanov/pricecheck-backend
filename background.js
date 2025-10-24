@@ -23,7 +23,6 @@ async function fetchJSON(url, opts) {
   }
 }
 
-const REQUEST_TIMEOUT_MS = 8000; // keep
 async function apiCompareByUPC(store, upc) {
   const qs = new URLSearchParams({ store, upc }).toString();
   for (const base of API_BASES) {
@@ -34,7 +33,6 @@ async function apiCompareByUPC(store, upc) {
   return { asin: null, results: [] };
 }
 
-
 async function apiCompareByASIN(asin) {
   const qs = new URLSearchParams({ asin }).toString();
   for (const base of API_BASES) {
@@ -43,16 +41,6 @@ async function apiCompareByASIN(asin) {
     if (data && Array.isArray(data.results)) return data;
   }
   return { results: [] };
-}
-
-async function apiResolve({ store, store_key, title }) {
-  const qs = new URLSearchParams({ store, store_key: store_key || '', title: title || '' }).toString();
-  for (const base of API_BASES) {
-    const url = `${base.replace(/\/+$/, '')}/v1/resolve?${qs}`;
-    const data = await fetchJSON(url);
-    if (data && typeof data.asin !== 'undefined') return data;
-  }
-  return { asin: null };
 }
 
 async function apiObserve(payload) {
@@ -93,24 +81,15 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     return true;
   }
 
-if (msg?.type === 'RESOLVE_COMPARE_REQUEST') {
-  (async () => {
-    const { store, store_key, title } = msg.payload || {};
-    // Try UPC one-shot first (fast path)
-    let data = await apiCompareByUPC(store, store_key || '');
-    if (!data?.asin) {
-      // Fallback to the old 2-step path
-      const r = await apiResolve({ store, store_key, title });
-      if (!r?.asin) return sendResponse({ results: [], asin: null });
-      const c = await apiCompareByASIN(r.asin);
-      return sendResponse({ results: c.results || [], asin: r.asin });
-    }
-    sendResponse({ results: data.results || [], asin: data.asin || null });
-  })();
-  return true;
-}
+  if (msg?.type === 'RESOLVE_COMPARE_REQUEST') {
+    (async () => {
+      const { store, store_key } = msg.payload || {};
+      const data = await apiCompareByUPC(store, store_key || '');
+      sendResponse({ results: data.results || [], asin: data.asin || null });
+    })();
+    return true;
+  }
 
-  // New: record a price observation into backend
   if (msg?.type === 'OBSERVE_PRICE') {
     (async () => {
       const ok = await apiObserve(msg.payload || {});
