@@ -36,26 +36,24 @@ function toASIN(s) {
   return /^[A-Z0-9]{10}$/.test(s) ? s : '';
 }
 
-// Health
-app.get('/health', (_req, res) => res.json({ ok: true, version: 'v-upc-fast' }));
+app.get('/health', (_req, res) => res.json({ ok: true, version: 'v-upc-rev-fixed' }));
 
-// ==================== UPC -> ASIN Resolve (single indexed lookup) ====================
+// ==================== Resolve: UPC -> ASIN ====================
+// Uses your expression indexes only: upper(btrim(asin)) and norm_upc(upc)
 app.get('/v1/resolve', async (req, res) => {
-  const storeNorm = normStore(req.query.store);
+  const storeNorm = normStore(req.query.store); // not used right now, kept for future branch logic
   const upcNorm = normUPC(req.query.store_key);
-  if (!storeNorm || !upcNorm) return res.json({ asin: null });
+  if (!upcNorm) return res.json({ asin: null });
 
   try {
-    // Prefer ASIN mapped by UPC in asins, else use listings.asin
     const sql = `
-      SELECT COALESCE(
-        (SELECT asin_up FROM public.asins    WHERE upc_norm = $2 LIMIT 1),
-        (SELECT asin_up FROM public.listings WHERE store_norm = $1 AND upc_norm = $2 AND asin_up IS NOT NULL
-           ORDER BY current_price_observed_at DESC NULLS LAST, id DESC LIMIT 1)
-      ) AS asin_up
+      SELECT upper(btrim(asin)) AS asin
+      FROM public.asins
+      WHERE public.norm_upc(upc) = public.norm_upc($1)
+      LIMIT 1
     `;
-    const { rows } = await pool.query(sql, [storeNorm, upcNorm]);
-    const asin = rows[0]?.asin_up || null;
+    const { rows } = await pool.query(sql, [upcNorm]);
+    const asin = rows[0]?.asin || null;
     return res.json({ asin });
   } catch (e) {
     console.error('resolve error:', e);
@@ -63,122 +61,81 @@ app.get('/v1/resolve', async (req, res) => {
   }
 });
 
-// ==================== Compare by UPC (one round trip) ====================
+// ==================== Compare by UPC ====================
+// Returns Amazon price if known plus all store listings with that UPC
 app.get('/v1/compare_by_upc', async (req, res) => {
-  const storeNorm = normStore(req.query.store);
-  const upcNorm = normUPC(req.query.upc);
-  if (!storeNorm || !upcNorm) return res.json({ asin: null, results: [] });
+  let upc = normUPC(req.query.upc);
+  if (!upc) return res.json({ asin: null, results: [] });
 
   try {
-    const sql = `
-      WITH v AS (
-        -- Try to anchor on ASIN by UPC first
-        SELECT a.asin_up AS asin, a.upc_norm AS upc_norm, a.variant_label,
-               a.current_price_cents AS amazon_price_cents,
-               a.current_price_observed_at AS amazon_observed_at,
-               p.title AS product_title, p.brand, p.category
-          FROM public.asins a
-          LEFT JOIN public.products p ON p.id = a.product_id
-         WHERE a.upc_norm = $1
-         LIMIT 1
-      ),
-      v2 AS (
-        -- If asins has no row for that UPC, derive ASIN from listings
-        SELECT COALESCE(
-                 (SELECT asin FROM v),
-                 (SELECT l.asin_up FROM public.listings l
-                   WHERE l.upc_norm = $1 AND l.asin_up IS NOT NULL
-                   ORDER BY l.current_price_observed_at DESC NULLS LAST, l.id DESC LIMIT 1)
-               ) AS asin
-      ),
-      vfit AS (
-        SELECT
-          v2.asin,
-          a.upc_norm,
-          a.variant_label,
-          a.current_price_cents AS amazon_price_cents,
-          a.current_price_observed_at AS amazon_observed_at,
-          p.title AS product_title, p.brand, p.category
-        FROM v2
-        LEFT JOIN public.asins a ON a.asin_up = v2.asin
-        LEFT JOIN public.products p ON p.id = a.product_id
-      ),
-      match_upc AS (
-        SELECT l.store, l.upc, l.url,
-               l.current_price_cents AS price_cents,
-               l.current_price_observed_at AS observed_at
-          FROM public.listings l
-          JOIN vfit ON l.upc_norm = COALESCE(vfit.upc_norm, $1)  -- match same UPC
-      ),
-      match_asin AS (
-        SELECT l.store, l.upc, l.url,
-               l.current_price_cents AS price_cents,
-               l.current_price_observed_at AS observed_at
-          FROM public.listings l
-          JOIN vfit ON l.asin_up = vfit.asin
-      ),
-      chosen AS (
-        SELECT * FROM match_upc
-        UNION ALL
-        SELECT * FROM match_asin
-        WHERE NOT EXISTS (SELECT 1 FROM match_upc LIMIT 1)
-      )
-      SELECT
-        'Amazon'::text AS store,
-        vfit.asin,
-        vfit.upc_norm AS upc,
-        vfit.amazon_price_cents AS price_cents,
-        vfit.amazon_observed_at AS observed_at,
-        NULL::text AS url,
-        vfit.product_title AS title,
-        vfit.brand,
-        vfit.category,
-        vfit.variant_label
-      FROM vfit
+    const r1 = await pool.query(
+      `SELECT upper(btrim(a.asin)) AS asin,
+              a.variant_label,
+              a.current_price_cents AS amazon_price_cents,
+              a.current_price_observed_at AS amazon_observed_at,
+              p.title, p.brand, p.category
+         FROM public.asins a
+         LEFT JOIN public.products p ON p.id = a.product_id
+        WHERE public.norm_upc(a.upc) = public.norm_upc($1)
+        LIMIT 1`,
+      [upc]
+    );
+    const A = r1.rows[0] || null;
+    const asin = A?.asin || null;
 
-      UNION ALL
+    const r2 = await pool.query(
+      `SELECT store,
+              upc,
+              url,
+              current_price_cents AS price_cents,
+              current_price_observed_at AS observed_at
+         FROM public.listings
+        WHERE public.norm_upc(upc) = public.norm_upc($1)
+        ORDER BY price_cents ASC NULLS LAST, store ASC`,
+      [upc]
+    );
 
-      SELECT
-        c.store,
-        vfit.asin,
-        (SELECT upc_norm FROM vfit) AS upc,
-        c.price_cents,
-        c.observed_at,
-        c.url,
-        (SELECT product_title FROM vfit) AS title,
-        NULL::text AS brand,
-        NULL::text AS category,
-        NULL::text AS variant_label
-      FROM chosen c
-
-      ORDER BY price_cents ASC NULLS LAST, store ASC
-    `;
-    const { rows } = await pool.query(sql, [upcNorm]);
-
-    const asin = rows.find(r => r.store === 'Amazon')?.asin || null;
-    res.json({
-      asin: asin || null,
-      results: rows.map(r => ({
+    const out = [];
+    if (A) {
+      out.push({
+        store: 'Amazon',
+        asin,
+        upc,
+        price_cents: A.amazon_price_cents,
+        seen_at: A.amazon_observed_at,
+        url: asin ? `https://www.amazon.com/dp/${asin}` : null,
+        product_name: A.title || '',
+        brand: A.brand || null,
+        category: A.category || null,
+        variant_label: A.variant_label || null,
+        currency: 'USD'
+      });
+    }
+    for (const r of r2.rows) {
+      out.push({
         store: r.store,
-        product_name: r.title || '',
+        asin,
+        upc,
         price_cents: r.price_cents,
-        url: r.url,
-        currency: 'USD',
-        asin: r.asin || null,
-        upc: r.upc || null,
         seen_at: r.observed_at,
-        brand: r.brand || null,
-        category: r.category || null,
-        variant_label: r.variant_label || null
-      }))
-    });
+        url: r.url,
+        product_name: A?.title || '',
+        brand: null,
+        category: null,
+        variant_label: null,
+        currency: 'USD'
+      });
+    }
+
+    res.json({ asin, results: out });
   } catch (e) {
     console.error('compare_by_upc error:', e);
     res.status(500).json({ asin: null, results: [] });
   }
 });
 
-// ==================== Compare by ASIN (unchanged contract, faster predicates) ====================
+// ==================== Compare by ASIN ====================
+// Joins Amazon row and any store listings that share the same UPC
 app.get('/v1/compare', async (req, res) => {
   const asin = toASIN(req.query.asin);
   if (!asin) return res.json({ results: [] });
@@ -186,8 +143,8 @@ app.get('/v1/compare', async (req, res) => {
   try {
     const sql = `
       WITH v AS (
-        SELECT a.asin_up AS asin,
-               a.upc_norm,
+        SELECT upper(btrim(a.asin)) AS asin,
+               public.norm_upc(a.upc) AS upc_norm,
                a.variant_label,
                a.current_price_cents AS amazon_price_cents,
                a.current_price_observed_at AS amazon_observed_at,
@@ -196,7 +153,7 @@ app.get('/v1/compare', async (req, res) => {
                p.category
           FROM public.asins a
           LEFT JOIN public.products p ON p.id = a.product_id
-         WHERE a.asin_up = $1
+         WHERE upper(btrim(a.asin)) = $1
          LIMIT 1
       ),
       match_upc AS (
@@ -204,20 +161,7 @@ app.get('/v1/compare', async (req, res) => {
                l.current_price_cents AS price_cents,
                l.current_price_observed_at AS observed_at
           FROM public.listings l
-          JOIN v ON l.upc_norm = v.upc_norm
-      ),
-      match_asin AS (
-        SELECT l.store, l.upc, l.url,
-               l.current_price_cents AS price_cents,
-               l.current_price_observed_at AS observed_at
-          FROM public.listings l
-          JOIN v ON l.asin_up = v.asin
-      ),
-      chosen AS (
-        SELECT * FROM match_upc
-        UNION ALL
-        SELECT * FROM match_asin
-        WHERE NOT EXISTS (SELECT 1 FROM match_upc LIMIT 1)
+          JOIN v ON public.norm_upc(l.upc) = v.upc_norm
       )
       SELECT
         'Amazon'::text AS store,
@@ -236,17 +180,17 @@ app.get('/v1/compare', async (req, res) => {
       UNION ALL
 
       SELECT
-        c.store,
+        m.store,
         (SELECT asin FROM v),
-        c.upc,
-        c.price_cents,
-        c.observed_at,
-        c.url,
+        m.upc,
+        m.price_cents,
+        m.observed_at,
+        m.url,
         (SELECT product_title FROM v) AS title,
         NULL::text AS brand,
         NULL::text AS category,
         NULL::text AS variant_label
-      FROM chosen c
+      FROM match_upc m
 
       ORDER BY price_cents ASC NULLS LAST, store ASC
     `;
@@ -273,7 +217,7 @@ app.get('/v1/compare', async (req, res) => {
   }
 });
 
-// ==================== Observe (uses normalized columns implicitly) ====================
+// ==================== Observe price ====================
 app.post('/v1/observe', async (req, res) => {
   const { store, asin, upc, price_cents, url, title, observed_at } = req.body || {};
   const storeNorm = normStore(store);
@@ -291,11 +235,17 @@ app.post('/v1/observe', async (req, res) => {
       const asinUp = toASIN(asin);
       if (!asinUp) throw new Error('asin required for Amazon');
 
-      await client.query(
-        `INSERT INTO public.asins (product_id, asin)
-         VALUES (NULL, $1) ON CONFLICT (asin_up) DO NOTHING`,
-        [asinUp]
-      );
+     // create ASIN row if missing, using your expression unique index
+    await client.query(
+      `INSERT INTO public.asins (product_id, asin)
+      SELECT NULL, $1
+      WHERE NOT EXISTS (
+        SELECT 1 FROM public.asins
+        WHERE upper(btrim(asin)) = upper(btrim($1))
+      )`,
+      [asinUp]
+    );
+
 
       await client.query(
         `INSERT INTO public.price_history (store, asin, price_cents, observed_at, url, title)
@@ -306,14 +256,16 @@ app.post('/v1/observe', async (req, res) => {
       const upcNorm = normUPC(upc);
       if (!upcNorm) throw new Error('upc required for non Amazon stores');
 
-      // Upsert listing by normalized keys
+      // Update by expression match first
       const upd = await client.query(
         `UPDATE public.listings
             SET url = COALESCE($3, url), status = 'active'
-          WHERE store_norm = $1 AND upc_norm = $2`,
-        [storeNorm, upcNorm, url || null]
+          WHERE lower(btrim(store)) = lower(btrim($1))
+            AND public.norm_upc(upc) = public.norm_upc($2)`,
+        [store, upcNorm, url || null]
       );
       if (upd.rowCount === 0) {
+        // Insert new listing. We cannot ON CONFLICT on an expression, so rely on prior update to dedupe.
         await client.query(
           `INSERT INTO public.listings (store, upc, url, status)
            VALUES ($1, $2, $3, 'active')`,
