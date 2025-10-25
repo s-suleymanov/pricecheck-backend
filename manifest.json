@@ -9,7 +9,8 @@
     "https://*.amazon.com/*",
     "https://*.target.com/*",
     "https://*.walmart.com/*",
-    "https://*.bestbuy.com/*"
+    "https://*.bestbuy.com/*",
+    "https://pricecheck-backend.onrender.com/*"
   ],
   "background": { "service_worker": "background.js" },
   "icons": {
@@ -20,11 +21,7 @@
   },
   "web_accessible_resources": [
     {
-      "resources": [
-        "content.html",
-        "content.css",
-        "icons/*"
-      ],
+      "resources": ["content.html", "content.css", "icons/*"],
       "matches": [
         "https://*.amazon.com/*",
         "https://*.target.com/*",

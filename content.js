@@ -1,4 +1,4 @@
-// content.js - stable cards, correct Amazon price, subheader shows Brand · Category, cards show per-store variant
+// content.js
 (() => {
   "use strict";
 
@@ -23,7 +23,6 @@
   const safeSet = async (kv) => { try { if (hasChrome()) await chrome.storage.local.set(kv); } catch {} };
   const safeSend = (msg) => new Promise((res) => { try { chrome.runtime.sendMessage(msg, (r) => res(r)); } catch { res(null); } });
   const clean = (s = "") => s.replace(/[\u200E\u200F\u202A-\u202E]/g, "").replace(/\s+/g, " ").trim();
-
   const siteOf = (h = location.hostname) => {
     if (/amazon\./i.test(h)) return "amazon";
     if (/target\.com$/i.test(h) || /\.target\.com$/i.test(h)) return "target";
@@ -32,20 +31,37 @@
     return "unknown";
   };
 
-  function normalizeStoreKey(store, key) {
-    if (!key) return "";
-    const s = String(store || "").toLowerCase();
-    let k = String(key || "").trim();
-    if (s === "target") {
-      k = k.replace(/^A[-\s]?/i, "");
-      k = k.replace(/[^0-9A-Z]/g, "");
-    } else if (s === "walmart" || s === "bestbuy") {
-      k = k.replace(/\D+/g, "");
-    }
+  // ---------- helpers ----------
+  function normalizeUPC(raw) {
+    let k = String(raw || "").replace(/[^0-9]/g, "");
+    if (k.length === 14 && k.startsWith("0")) k = k.slice(1);
+    if (k.length === 13 && k.startsWith("0")) k = k.slice(1);
     return k;
   }
+  function toCents(txt = "") {
+    const n = parseFloat(String(txt).replace(/[^0-9.]/g, ""));
+    return isNaN(n) ? null : Math.round(n * 100);
+  }
+  function extractUPCFromLdJson() {
+    for (const s of document.querySelectorAll('script[type="application/ld+json"]')) {
+      try {
+        const j = JSON.parse(s.textContent.trim());
+        const pick = (o) => o?.gtin12 || o?.gtin13 || o?.gtin14;
+        if (Array.isArray(j)) {
+          for (const it of j) {
+            const gt = pick(it);
+            if (gt && /^\d{12,14}$/.test(gt)) return normalizeUPC(gt);
+          }
+        } else {
+          const gt = pick(j);
+          if (gt && /^\d{12,14}$/.test(gt)) return normalizeUPC(gt);
+        }
+      } catch {}
+    }
+    return null;
+  }
 
-  // ---------- robust Amazon price ----------
+  // ---------- Amazon ----------
   function getAmazonPriceCents() {
     const pref = document.querySelector(".priceToPay .a-offscreen");
     if (pref?.innerText) {
@@ -55,14 +71,9 @@
     const nodes = Array.from(document.querySelectorAll(".a-price .a-offscreen, [data-a-color='price'] .a-offscreen, #corePrice_feature_div .a-offscreen"));
     for (const el of nodes) {
       if (!el?.innerText) continue;
-      let bad = false;
-      let p = el;
+      let bad = false, p = el;
       for (let i = 0; i < 4 && p; i++) {
-        if (
-          p.classList?.contains("a-text-price") ||
-          p.classList?.contains("basisPrice") ||
-          p.getAttribute?.("data-a-strike") === "true"
-        ) { bad = true; break; }
+        if (p.classList?.contains("a-text-price") || p.classList?.contains("basisPrice") || p.getAttribute?.("data-a-strike") === "true") { bad = true; break; }
         p = p.parentElement;
       }
       if (bad) continue;
@@ -72,39 +83,7 @@
     return null;
   }
 
-  const toCents = (txt = "") => {
-    const n = parseFloat(String(txt).replace(/[^0-9.]/g, ""));
-    return isNaN(n) ? null : Math.round(n * 100);
-  };
-
-  // ---------- UPC extractors for non Amazon ----------
-  function extractUPCFromLdJson() {
-    for (const s of document.querySelectorAll('script[type="application/ld+json"]')) {
-      try {
-        const j = JSON.parse(s.textContent.trim());
-        if (Array.isArray(j)) {
-          for (const item of j) {
-            const gt = item?.gtin12 || item?.gtin13;
-            if (gt && /^\d{12,13}$/.test(gt)) return gt.length === 13 && gt.startsWith("0") ? gt.slice(1) : gt;
-          }
-        } else {
-          const gt = j?.gtin12 || j?.gtin13;
-          if (gt && /^\d{12,13}$/.test(gt)) return gt.length === 13 && gt.startsWith("0") ? gt.slice(1) : gt;
-        }
-      } catch {}
-    }
-    return null;
-  }
-  function extractUPCFromText(root) {
-    const t = (root || document.body)?.innerText || "";
-    const m = t.match(/UPC\s*(?:#|:)?\s*(\d{12,13})/i) || t.match(/(^|[^\d])(\d{12,13})(?!\d)/);
-    if (!m) return null;
-    const raw = m[1] || m[2];
-    if (!raw) return null;
-    return raw.length === 13 && raw.startsWith("0") ? raw.slice(1) : raw;
-  }
-
-  // ---------- drivers ----------
+  // ---------- site drivers ----------
   const DRIVERS = {
     amazon: {
       store: "Amazon",
@@ -117,7 +96,7 @@
       getVariantLabel() {
         const cleanTxt = (t) => String(t || "").replace(/\s+/g, " ").replace(/^\s*(Select|Choose)\b.*$/i, "").trim();
         const picks = new Set();
-        const btnSelectors = [
+        [
           "#twister .a-button-selected .a-button-text",
           "#inline-twister-expander-content .a-button-selected .a-button-text",
           "#twister [aria-pressed='true'] .a-button-text",
@@ -127,47 +106,42 @@
           "#variation_style_name .selection",
           "#variation_configuration .selection",
           "#variation_pattern_name .selection",
-          "#twister .a-dropdown-prompt"
-        ];
-        for (const sel of btnSelectors) {
+          "#twister .a-dropdown-prompt",
+        ].forEach((sel) => {
           document.querySelectorAll(sel).forEach((el) => {
             const t = cleanTxt(el.getAttribute?.("aria-label") || el.textContent);
             if (t) picks.add(t);
           });
-        }
-        const inlineVals = document.querySelectorAll(
-          "#inline-twister-expander-content [data-testid='inline-twister-dim-values'], " +
-          "#inline-twister-expander-content [data-testid='inline-twister-value'], " +
-          "#twister [data-testid='inline-twister-value']"
-        );
-        inlineVals.forEach((el) => {
-          const t = cleanTxt(el.textContent);
-          if (t) picks.add(t);
         });
-        const out = Array.from(picks).filter(Boolean);
-        return out.join(" ");
+        return Array.from(picks).filter(Boolean).join(" ");
       },
       getPriceCents() { return getAmazonPriceCents(); },
       getASIN() {
-        const fromUrl = location.pathname.match(/(?:dp|gp\/product)\/([A-Z0-9]{10})(?:[/?]|$)/i)?.[1];
+        const fromUrl  = location.pathname.match(/(?:dp|gp\/product)\/([A-Z0-9]{10})(?:[/?]|$)/i)?.[1];
         const fromAttr = document.querySelector("[data-asin]")?.getAttribute("data-asin");
-        return (fromUrl || fromAttr || "").toUpperCase() || null;
+        const a = (fromUrl || fromAttr || "").toUpperCase();
+        return a || null;
       },
-      getStoreKey() { return null; },
+      getStoreSKU() { return null; }, // not used for Amazon
       productKey() { return `${this.getASIN() || ""}|${location.pathname}`; }
     },
 
+    // TARGET: store_sku = TCIN (no need to open specs)
     target: {
       store: "Target",
       getTitle() {
-        return clean(document.querySelector('h1[data-test="product-title"]')?.innerText || document.title);
+        const t = document.querySelector('h1[data-test="product-title"]')?.innerText
+               || document.querySelector('meta[property="og:title"]')?.content
+               || document.title;
+        return clean(t || "");
       },
       getPriceCents() {
         const sels = [
           '[data-test="product-price"]',
           '[data-test="offer-price"]',
           '[data-test^="price"]',
-          'meta[itemprop="price"]'
+          'meta[itemprop="price"]',
+          'meta[property="product:price:amount"]',
         ];
         for (const sel of sels) {
           const el = document.querySelector(sel);
@@ -178,50 +152,43 @@
         return null;
       },
       getASIN() { return null; },
-      getStoreKey() {
-        const gt = extractUPCFromLdJson();
-        if (gt) return gt;
-        const containers = [
-          '[data-test="item-details-specifications"]',
-          '[data-test="specifications"]',
-          '#specAndDescript'
-        ];
-        for (const sel of containers) {
-          const root = document.querySelector(sel);
-          if (!root) continue;
-          const upc = extractUPCFromText(root);
-          if (upc) return upc;
+      // TCIN from URL or preloaded JSON (works with specs closed)
+      getStoreSKU() {
+        // 1) URL like .../-/A-93167736
+        const m = location.pathname.match(/\/A-([0-9]{6,12})(?:$|[/?#])/i);
+        if (m) return m[1];
+
+        // 2) embedded preloaded state blobs
+        const scripts = Array.from(document.querySelectorAll("script")).slice(0, 80);
+        for (const s of scripts) {
+          const txt = s.textContent || "";
+          const tcinMatch = txt.match(/"tcin"\s*:\s*"([0-9]{6,12})"/i) || txt.match(/"tcin"\s*:\s*([0-9]{6,12})/i);
+          if (tcinMatch) return String(tcinMatch[1]);
         }
-        return extractUPCFromText(document.body);
+        return null;
       },
-      productKey() { return `${this.getStoreKey() || ""}|${location.pathname}`; }
+      productKey() { return `${this.getStoreSKU() || ""}|${location.pathname}`; }
     },
 
     walmart: {
       store: "Walmart",
       getTitle() { return clean(document.querySelector("h1")?.innerText || document.title); },
       getPriceCents() {
-        const el = document.querySelector('[itemprop="price"]') ||
-                   document.querySelector('[data-automation-id="product-price"]') ||
-                   document.querySelector('meta[itemprop="price"]');
+        const el = document.querySelector('[itemprop="price"]')
+               || document.querySelector('[data-automation-id="product-price"]')
+               || document.querySelector('meta[itemprop="price"]');
         const raw = el?.getAttribute?.("content") || el?.textContent || "";
         return toCents(raw);
       },
       getASIN() { return null; },
-      // Now we try UPC first. Only if totally missing do we fall back to nothing.
-      getStoreKey() {
-        const gt = extractUPCFromLdJson();
-        if (gt) return gt;
-        // Walmart sometimes has “gtin13” in a meta
-        const gtMeta = document.querySelector('meta[itemprop="gtin13"]')?.content ||
-                       document.querySelector('meta[itemprop="gtin12"]')?.content;
-        if (gtMeta && /^\d{12,13}$/.test(gtMeta)) {
-          return gtMeta.length === 13 && gtMeta.startsWith("0") ? gtMeta.slice(1) : gtMeta;
-        }
-        // Try specs text
-        return extractUPCFromText(document.body);
+      // store_sku = item id from URL path when available
+      getStoreSKU() {
+        // e.g. /ip/<slug>/<ITEMID>
+        const m = location.pathname.match(/\/ip\/[^/]+\/([0-9]{6,20})(?:$|[/?#])/i);
+        if (m) return m[1];
+        return null;
       },
-      productKey() { return `${this.getStoreKey() || ""}|${location.pathname}`; }
+      productKey() { return `${this.getStoreSKU() || ""}|${location.pathname}`; }
     },
 
     bestbuy: {
@@ -238,27 +205,16 @@
         return toCents(el?.innerText || "");
       },
       getASIN() { return null; },
-      // Previously returned SKU. Now extract UPC reliably.
-      getStoreKey() {
-        // 1) ld+json
-        const gt = extractUPCFromLdJson();
-        if (gt) return gt;
-
-        // 2) BestBuy specs table often shows "UPC" near a 12 digit number
-        const specsRoots = [
-          ".product-specs", ".specs", ".product-data", ".product-attributes", "main", "body"
-        ];
-        for (const sel of specsRoots) {
-          const root = document.querySelector(sel);
-          if (!root) continue;
-          const upc = extractUPCFromText(root);
-          if (upc) return upc;
-        }
-
-        // 3) Full body fallback scan
-        return extractUPCFromText(document.body);
+      // store_sku = numeric SKU from page
+      getStoreSKU() {
+        // Try meta or visible SKU label
+        const meta = document.querySelector('meta[itemprop="sku"]')?.content;
+        if (meta && /^\d{4,10}$/.test(meta)) return meta;
+        const m = (document.body.innerText || "").match(/\bSKU\s*:?[\s#]*([0-9]{4,10})\b/i);
+        if (m) return m[1];
+        return null;
       },
-      productKey() { return `${this.getStoreKey() || ""}|${location.pathname}`; }
+      productKey() { return `${this.getStoreSKU() || ""}|${location.pathname}`; }
     }
   };
 
@@ -334,6 +290,7 @@
       const logoEl = sh.querySelector("#ps-logo");
       if (logoEl) logoEl.src = chrome.runtime.getURL("icons/logo.png");
 
+      // Resize
       let resizing = false;
       sh.querySelector("#ps-resize")?.addEventListener("mousedown", (e) => {
         e.preventDefault();
@@ -372,9 +329,7 @@
     },
 
     _reconcileResults(resultsEl, list, iconFor) {
-      const makeKey = (p) =>
-        `${(p.store || '').toLowerCase()}|${p.asin || p.url || ''}`;
-
+      const makeKey = (p) => `${(p.store || '').toLowerCase()}|${p.asin || p.url || ''}`;
       const next = new Map();
       list.forEach(p => next.set(makeKey(p), p));
 
@@ -464,26 +419,36 @@
         title: D.getTitle(),
         asin: D.getASIN ? D.getASIN() : null,
         price_cents: D.getPriceCents ? D.getPriceCents() : null,
-        store_key: D.getStoreKey ? D.getStoreKey() : null
+        store_sku: D.getStoreSKU ? D.getStoreSKU() : null, // TCIN on Target, SKU on others
       };
       await safeSet({ lastSnapshot: snap });
 
       const resultsEl = $("#ps-results");
       if (!resultsEl) return;
 
-      const hadCards = !!resultsEl.querySelector(".result-card");
       let statusEl = resultsEl.querySelector(".status");
       if (!statusEl) {
         statusEl = document.createElement("div");
         statusEl.className = "status";
         resultsEl.prepend(statusEl);
       }
-      if (hadCards) {
-        statusEl.style.display = "none";
-        statusEl.textContent = "";
-      } else {
-        statusEl.style.display = "block";
-        statusEl.textContent = "Searching...";
+      statusEl.style.display = "block";
+      statusEl.textContent = "Searching...";
+
+      // Product line
+      const prodLabelEl = sh.querySelector(".asin-row strong");
+      const prodValEl   = sh.querySelector("#ps-asin-val");
+      if (prodLabelEl && prodValEl) {
+        if (site === "amazon") {
+          prodLabelEl.textContent = "ASIN";
+          prodValEl.textContent = snap.asin || "Not found";
+        } else if (site === "target") {
+          prodLabelEl.textContent = "TCIN";
+          prodValEl.textContent = snap.store_sku || "Not found";
+        } else {
+          prodLabelEl.textContent = "Product";
+          prodValEl.textContent = snap.store_sku || "Not found";
+        }
       }
 
       let list = [];
@@ -505,58 +470,32 @@
           });
         }
       } else {
-        const resp = await safeSend({
-          type: "RESOLVE_COMPARE_REQUEST",
-          payload: { store: D.store, store_key: snap.store_key || "", title: snap.title }
-        });
-        resolvedASIN = resp?.asin || null;
-
-        list = Array.isArray(resp?.results) ? resp.results.slice() : [];
-
-        const alreadySelf = list.some(p => {
-          const s1 = (p.store || "").toLowerCase();
-          const s2 = (D.store || "").toLowerCase();
-          const urlMatches = p.url && p.url.split("?")[0] === location.href.split("?")[0];
-          return s1 === s2 && urlMatches;
-        });
-        if (!alreadySelf) {
-          list.push({
-            store: D.store,
-            product_name: snap.title,
-            price_cents: snap.price_cents,
-            url: location.href,
-            variant_label: null
+        if (!snap.store_sku || String(snap.store_sku).trim() === "") {
+          list = [];
+          resolvedASIN = null;
+        } else {
+          const resp = await safeSend({
+            type: "RESOLVE_COMPARE_REQUEST",
+            payload: { store: D.store, store_sku: snap.store_sku }
           });
-        }
+          resolvedASIN = resp?.asin || null;
+          list = Array.isArray(resp?.results) ? resp.results.slice() : [];
 
-        const hasAmazon = list.some(p => (p.store || "").toLowerCase() === "amazon");
-        if (resolvedASIN && !hasAmazon) {
-          list.push({
-            store: "Amazon",
-            product_name: snap.title || "View on Amazon",
-            price_cents: null,
-            url: `https://www.amazon.com/dp/${resolvedASIN}`,
-            variant_label: null,
-            asin: resolvedASIN
-          });
-        }
-        if (!resolvedASIN) {
-          const q = snap.title || snap.store_key || "";
-          list.push({
-            store: "Amazon",
-            product_name: "Search for a match",
-            price_cents: null,
-            url: `https://www.amazon.com/s?k=${encodeURIComponent(q)}`,
-            variant_label: null
-          });
+          const hasAmazon = list.some(p => (p.store || "").toLowerCase() === "amazon");
+          if (resolvedASIN && !hasAmazon) {
+            list.push({
+              store: "Amazon",
+              product_name: snap.title || "",
+              price_cents: null,
+              url: `https://www.amazon.com/dp/${resolvedASIN}`,
+              variant_label: null,
+              asin: resolvedASIN
+            });
+          }
         }
       }
 
-      const asinEl = sh.querySelector("#ps-asin-val");
-      if (asinEl) asinEl.textContent = resolvedASIN || snap.asin || (site === "amazon" ? "Not found" : "Resolving...");
-      const upcEl = sh.querySelector("#ps-upc-val");
-      if (upcEl) upcEl.textContent = snap.store_key || "UPC not found";
-
+      // Category line (brand + category if present)
       const bcEl = sh.querySelector("#ps-variant-val");
       if (bcEl) {
         const amazonRow = list.find(r => (r.store || "").toLowerCase() === "amazon");
@@ -566,31 +505,16 @@
         bcEl.textContent = bc || "N/A";
       }
 
+      // Observe current page price
       if (site === "amazon") {
-        const payload = {
-          store: "Amazon",
-          asin: snap.asin || null,
-          price_cents: snap.price_cents,
-          url: location.href,
-          title: snap.title
-        };
+        const payload = { store: "Amazon", asin: snap.asin || null, price_cents: snap.price_cents, url: location.href, title: snap.title };
         try { await safeSend({ type: "OBSERVE_PRICE", payload }); } catch {}
-      } else if (snap.store_key) {
-        const payload = {
-          store: D.store,
-          upc: snap.store_key,
-          price_cents: snap.price_cents,
-          url: location.href,
-          title: snap.title
-        };
+      } else if (snap.store_sku) {
+        const payload = { store: D.store, store_sku: snap.store_sku, price_cents: snap.price_cents, url: location.href, title: snap.title };
         try { await safeSend({ type: "OBSERVE_PRICE", payload }); } catch {}
       }
 
-      if (!list.length) {
-        statusEl.textContent = "No prices found.";
-        statusEl.style.display = "block";
-        return;
-      }
+      if (!list.length) { statusEl.textContent = "No prices found."; return; }
 
       const asinForLink = String((resolvedASIN || snap.asin || "")).toUpperCase();
       if (/^[A-Z0-9]{10}$/.test(asinForLink)) {
@@ -616,16 +540,15 @@
     toggle() { this.open ? this.close() : this.openSidebar(); },
 
     _debounce(fn, wait = 600) { return (...args) => { clearTimeout(this._debounceTimer); this._debounceTimer = setTimeout(() => fn.apply(this, args), wait); }; },
-
     _productKey() {
       const site = siteOf();
       const D = DRIVERS[site] || DRIVERS.amazon;
       const asin = D.getASIN ? D.getASIN() : "";
+      const sku  = D.getStoreSKU ? D.getStoreSKU() : "";
       const variant = D.getVariantLabel ? D.getVariantLabel() : "";
-      const key = site === "amazon" ? `${asin}|${variant}` : (D.getStoreKey() || "");
+      const key = site === "amazon" ? `${asin}|${variant}` : (sku || "");
       return `${key}|${location.pathname}`;
     },
-
     async _refreshIfChanged() {
       if (!this.open) return;
       const key = this._productKey();
@@ -641,7 +564,6 @@
       try { await this.populate(); } catch {}
       finally { this._inflight = null; }
     },
-
     _bindProductObservers() {
       const triggerCheck = this._debounce(() => {
         setTimeout(() => this._refreshIfChanged().catch(() => {}), 300);
@@ -659,33 +581,20 @@
         childList: true,
         attributes: true,
         attributeFilter: [
-          'class',
-          'aria-pressed',
-          'aria-checked',
-          'aria-label',
-          'data-defaultasin',
-          'data-asin',
-          'value'
+          'class','aria-pressed','aria-checked','aria-label','data-defaultasin','data-asin','value'
         ]
       });
 
       let last = location.href;
-      setInterval(() => {
-        if (location.href !== last) {
-          last = location.href;
-          triggerCheck();
-        }
-      }, 800);
+      setInterval(() => { if (location.href !== last) { last = location.href; triggerCheck(); } }, 800);
 
       triggerCheck();
     },
-
     _bindRuntimeMessage() {
       if (globalThis.__PC_MSG_BOUND__) return;
       chrome.runtime?.onMessage.addListener((m) => { if (m?.type === "TOGGLE_SIDEBAR") this.toggle(); });
       globalThis.__PC_MSG_BOUND__ = true;
     },
-
     init() {
       this._bindRuntimeMessage();
       this._bindProductObservers();
