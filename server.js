@@ -117,6 +117,77 @@ app.get("/v1/compare", async (req, res) => {
   }
 });
 
+// ---------- Compare by store_sku (Target/Walmart/BestBuy → Amazon) ----------
+app.get("/v1/compare_by_store_sku", async (req, res) => {
+  const store = normStore(req.query.store);
+  const storeSku = String(req.query.store_sku || "").trim();
+
+  if (!store || !storeSku)
+    return res.status(400).json({ asin: null, results: [], error: "store and store_sku required" });
+
+  try {
+    // Step 1: find UPC from listings by store + store_sku
+    const r1 = await pool.query(
+      `SELECT upc
+         FROM public.listings
+        WHERE lower(btrim(store)) = lower(btrim($1))
+          AND public.norm_sku(store_sku) = public.norm_sku($2)
+        ORDER BY current_price_observed_at DESC NULLS LAST, id DESC
+        LIMIT 1`,
+      [store, storeSku]
+    );
+
+    const upc = r1.rows[0]?.upc ? normUPC(r1.rows[0].upc) : null;
+    if (!upc) return res.json({ asin: null, results: [] });
+
+    // Step 2: Find Amazon ASIN (if exists)
+    const r2 = await pool.query(
+      `SELECT asin
+         FROM public.asins
+        WHERE public.norm_upc(upc) = public.norm_upc($1)
+        LIMIT 1`,
+      [upc]
+    );
+
+    const asin = r2.rows[0]?.asin || null;
+
+    // Step 3: Reuse main compare logic by UPC
+    const sql = `
+      WITH base AS (
+        SELECT asin, upc, brand, category, model_name, model_number,
+               variant_label, current_price_cents, current_price_observed_at
+        FROM public.asins
+        WHERE public.norm_upc(upc) = public.norm_upc(($1)::text)
+        LIMIT 1
+      )
+      SELECT
+        'Amazon'::text AS store,
+        b.asin, b.upc, b.current_price_cents AS price_cents,
+        b.current_price_observed_at AS observed_at,
+        NULL::text AS url,
+        b.brand, b.category, b.model_name, b.model_number, b.variant_label
+      FROM base b
+      WHERE b.current_price_cents IS NOT NULL
+
+      UNION ALL
+
+      SELECT
+        l.store, NULL::text AS asin, l.upc, l.current_price_cents, l.current_price_observed_at,
+        l.url, NULL::text, NULL::text, NULL::text, NULL::text, l.variant_label
+      FROM public.listings l
+      JOIN base b ON public.norm_upc(l.upc) = public.norm_upc(b.upc)
+      ORDER BY price_cents ASC NULLS LAST, store ASC;
+    `;
+
+    const { rows } = await pool.query(sql, [upc]);
+    res.json({ asin, results: rows });
+  } catch (e) {
+    console.error("compare_by_store_sku error:", e);
+    res.status(500).json({ asin: null, results: [] });
+  }
+});
+
+
 // ---------- Observe ----------
 app.post("/v1/observe", async (req, res) => {
   const {
