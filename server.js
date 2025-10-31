@@ -161,10 +161,10 @@ app.get("/v1/compare_by_store_sku", async (req, res) => {
         LIMIT 1
       )
       SELECT
-        'Amazon'::text AS store,
-        b.asin, b.upc, b.current_price_cents AS price_cents,
-        b.current_price_observed_at AS observed_at,
-        NULL::text AS url,
+      'Amazon'::text AS store,
+      b.asin, b.upc, b.current_price_cents AS price_cents,
+      b.current_price_observed_at AS observed_at,
+      ('https://www.amazon.com/dp/' || b.asin) AS url,
         b.brand, b.category, b.model_name, b.model_number, b.variant_label
       FROM base b
       WHERE b.current_price_cents IS NOT NULL
