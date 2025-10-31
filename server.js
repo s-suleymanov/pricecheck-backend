@@ -1,4 +1,4 @@
-// server.js (Unified ASINS table)
+// server.js — Unified ASINS Table (PriceCheck v0.9)
 const express = require("express");
 const { Pool } = require("pg");
 
@@ -35,10 +35,14 @@ function toASIN(s) {
   s = String(s || "").trim().toUpperCase();
   return /^[A-Z0-9]{10}$/.test(s) ? s : "";
 }
+function normSKU(val) {
+  if (!val) return "";
+  return String(val).replace(/[^0-9A-Za-z]/g, "").toUpperCase();
+}
 
 // ---------- Health Check ----------
 app.get("/health", (_req, res) =>
-  res.json({ ok: true, version: "unified-asins" })
+  res.json({ ok: true, version: "unified-asins-0.9" })
 );
 
 // ---------- UPC → ASIN ----------
@@ -60,7 +64,7 @@ app.get("/v1/resolve", async (req, res) => {
   }
 });
 
-// ---------- Compare by UPC ----------
+// ---------- Compare by ASIN or UPC ----------
 app.get("/v1/compare", async (req, res) => {
   const asin = toASIN(req.query.asin);
   const upcNorm = normUPC(req.query.upc);
@@ -68,20 +72,19 @@ app.get("/v1/compare", async (req, res) => {
     return res.status(400).json({ results: [], error: "need asin or upc" });
 
   try {
-    // Step 1: find by ASIN or UPC
-    const q1 = await pool.query(
-      `SELECT asin, store, upc, url, variant_label,
+    const { rows } = await pool.query(
+      `SELECT store, asin, upc, url, variant_label,
               current_price_cents AS price_cents,
               current_price_observed_at AS observed_at,
               brand, model_name, model_number, category
          FROM public.asins
         WHERE ($1 IS NOT NULL AND upper(btrim(asin)) = upper(btrim($1)))
            OR ($2 IS NOT NULL AND public.norm_upc(upc) = public.norm_upc($2))
-        ORDER BY current_price_cents ASC NULLS LAST, store ASC`,
+        ORDER BY price_cents ASC NULLS LAST, store ASC`,
       [asin || null, upcNorm || null]
     );
 
-    const out = q1.rows.map((r) => ({
+    const out = rows.map((r) => ({
       store: r.store || "Amazon",
       asin: r.asin || null,
       upc: r.upc || null,
@@ -103,7 +106,49 @@ app.get("/v1/compare", async (req, res) => {
   }
 });
 
-// ---------- Observe ----------
+// ---------- Compare by store_sku (Target/Walmart/BestBuy) ----------
+app.get("/v1/compare_by_store_sku", async (req, res) => {
+  const store = normStore(req.query.store);
+  const sku = normSKU(req.query.store_sku);
+  if (!store || !sku)
+    return res.status(400).json({ asin: null, results: [], error: "missing params" });
+
+  try {
+    // Lookup UPC in asins
+    const r0 = await pool.query(
+      `SELECT upc
+         FROM public.asins
+        WHERE lower(btrim(store)) = lower(btrim($1))
+          AND public.norm_sku(upc) = public.norm_sku($2)
+        LIMIT 1`,
+      [store, sku]
+    );
+
+    const upc = r0.rows[0]?.upc;
+    if (!upc) return res.json({ asin: null, results: [] });
+
+    const { rows } = await pool.query(
+      `SELECT store, asin, upc, url,
+              current_price_cents AS price_cents,
+              current_price_observed_at AS observed_at,
+              brand, category, model_name, model_number, variant_label
+         FROM public.asins
+        WHERE public.norm_upc(upc) = public.norm_upc($1)
+        ORDER BY price_cents ASC NULLS LAST, store ASC`,
+      [upc]
+    );
+
+    const asin = rows.find((r) => (r.store || "").toLowerCase() === "amazon")
+      ?.asin || null;
+
+    res.json({ asin, results: rows });
+  } catch (e) {
+    console.error("compare_by_store_sku error:", e);
+    res.status(500).json({ asin: null, results: [] });
+  }
+});
+
+// ---------- Observe (Amazon + Others unified) ----------
 app.post("/v1/observe", async (req, res) => {
   const {
     store,
@@ -132,7 +177,7 @@ app.post("/v1/observe", async (req, res) => {
   try {
     await client.query("BEGIN");
 
-    // ---------- UPSERT INTO ASINS ----------
+    // ---------- Unified UPSERT ----------
     await client.query(
       `
       INSERT INTO public.asins (
@@ -145,9 +190,9 @@ app.post("/v1/observe", async (req, res) => {
         $6, COALESCE($7::timestamptz, now()),
         $8, $9, $10, $11, now()
       )
-      ON CONFLICT (asin)
+      ON CONFLICT (lower(btrim(store)), public.norm_upc(upc))
       DO UPDATE SET
-        upc = COALESCE(EXCLUDED.upc, public.asins.upc),
+        asin = COALESCE(EXCLUDED.asin, public.asins.asin),
         url = COALESCE(EXCLUDED.url, public.asins.url),
         variant_label = COALESCE(EXCLUDED.variant_label, public.asins.variant_label),
         brand = COALESCE(EXCLUDED.brand, public.asins.brand),
@@ -172,7 +217,7 @@ app.post("/v1/observe", async (req, res) => {
       ]
     );
 
-    // ---------- PRICE HISTORY ----------
+    // ---------- Log price_history ----------
     await client.query(
       `INSERT INTO public.price_history (store, asin, upc, price_cents, observed_at, url, title)
        VALUES ($1, $2, $3, $4, COALESCE($5::timestamptz, now()), $6, $7)`,
@@ -198,7 +243,7 @@ app.post("/v1/observe", async (req, res) => {
   }
 });
 
-// ---------- Start Server ----------
+// ---------- Start ----------
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, "0.0.0.0", () =>
   console.log(`PriceCheck unified API listening on ${PORT}`)
