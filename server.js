@@ -73,8 +73,8 @@ app.get("/v1/compare", async (req, res) => {
         SELECT asin, upc, brand, category, model_name, model_number,
                variant_label, current_price_cents, current_price_observed_at
         FROM public.asins
-        WHERE ($1 IS NOT NULL AND upper(btrim(asin)) = upper(btrim($1)))
-           OR ($2 IS NOT NULL AND public.norm_upc(upc) = public.norm_upc($2))
+        WHERE (($1)::text IS NOT NULL AND upper(btrim(asin)) = upper(btrim(($1)::text)))
+           OR (($2)::text IS NOT NULL AND public.norm_upc(upc) = public.norm_upc(($2)::text))
         LIMIT 1
       )
       SELECT
