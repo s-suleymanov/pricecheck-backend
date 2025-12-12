@@ -270,183 +270,274 @@
     return text;
   }
 
-  // ---------- main ----------
   const PS = {
-    id: ROOT_ID,
-    width: 380,
-    open: false,
-    root: null,
-    shadow: null,
-    async ensure() {
-      const existing = document.getElementById(this.id);
-      if (existing) {
-        this.root = existing;
-        this.shadow = existing.shadowRoot;
-        return existing;
+  id: ROOT_ID,
+  width: 380,
+  open: false,
+  root: null,
+  shadow: null,
+
+  // New: tracking for auto refresh
+  watchTimer: null,
+  lastKey: null,
+  isPopulating: false,
+
+  // Build a "key" for the current product and URL
+  makeKey() {
+    const site = siteOf();
+    const D = DRIVERS[site] || DRIVERS.amazon;
+    const asin = D.getASIN ? D.getASIN() : null;
+    const sku = D.getStoreSKU ? D.getStoreSKU() : null;
+    const title = D.getTitle ? D.getTitle() : null;
+    return [site, asin, sku, title, location.href].join("|");
+  },
+
+  // Start watching for product changes while sidebar is open
+  startWatcher() {
+    if (this.watchTimer) return;
+    this.lastKey = this.makeKey();
+    this.watchTimer = setInterval(async () => {
+      if (!this.open) return;
+      const keyNow = this.makeKey();
+      if (keyNow === this.lastKey) return;
+      this.lastKey = keyNow;
+
+      if (this.isPopulating) return;
+      try {
+        this.isPopulating = true;
+        await this.populate();
+      } finally {
+        this.isPopulating = false;
       }
-      const root = document.createElement("div");
-      root.id = this.id;
-      root.style.all = "initial";
-      root.style.position = "fixed";
-      root.style.top = "0";
-      root.style.left = "0";
-      root.style.height = "100%";
-      root.style.width = this.width + "px";
-      root.style.zIndex = "2147483647";
-      root.style.transform = "translateX(-100%)";
-      root.style.transition = "transform 160ms ease";
-      document.documentElement.appendChild(root);
-      const sh = root.attachShadow({ mode: "open" });
+    }, 1200); // about once per second
+  },
 
-      const [html, css] = await Promise.all([
-        loadAsset(HTML_URL),
-        loadAsset(CSS_URL),
-      ]);
-      const style = document.createElement("style");
-      style.textContent = css;
-      const container = document.createElement("div");
-      container.innerHTML = html;
-      sh.appendChild(style);
-      sh.appendChild(container);
+  // Stop watcher when sidebar is closed
+  stopWatcher() {
+    if (this.watchTimer) {
+      clearInterval(this.watchTimer);
+      this.watchTimer = null;
+    }
+  },
 
-      sh.querySelector("#ps-close")?.addEventListener("click", (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        this.close();
-      });
+  async ensure() {
+    const existing = document.getElementById(this.id);
+    if (existing) {
+      this.root = existing;
+      this.shadow = existing.shadowRoot;
+      return existing;
+    }
+    const root = document.createElement("div");
+    root.id = this.id;
+    root.style.all = "initial";
+    root.style.position = "fixed";
+    root.style.top = "0";
+    root.style.left = "0";
+    root.style.height = "100%";
+    root.style.width = this.width + "px";
+    root.style.zIndex = "2147483647";
+    root.style.transform = "translateX(-100%)";
+    root.style.transition = "transform 160ms ease";
+    document.documentElement.appendChild(root);
+    const sh = root.attachShadow({ mode: "open" });
 
-      const logoEl = sh.querySelector("#ps-logo");
-      if (logoEl) logoEl.src = chrome.runtime.getURL("icons/logo.png");
+    const [html, css] = await Promise.all([
+      loadAsset(HTML_URL),
+      loadAsset(CSS_URL),
+    ]);
+    const style = document.createElement("style");
+    style.textContent = css;
+    const container = document.createElement("div");
+    container.innerHTML = html;
+    sh.appendChild(style);
+    sh.appendChild(container);
 
-      this.root = root;
-      this.shadow = sh;
-      return root;
-    },
+    sh.querySelector("#ps-close")?.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      this.close();
+    });
 
-    async populate() {
-      if (!this.shadow) return;
-      const sh = this.shadow;
-      const site = siteOf();
-      const D = DRIVERS[site] || DRIVERS.amazon;
+    const logoEl = sh.querySelector("#ps-logo");
+    if (logoEl) logoEl.src = chrome.runtime.getURL("icons/logo.png");
 
-      const snap = {
-        title: D.getTitle(),
-        asin: D.getASIN ? D.getASIN() : null,
-        price_cents: D.getPriceCents ? D.getPriceCents() : null,
-        store_sku: D.getStoreSKU ? D.getStoreSKU() : null,
-      };
-      await safeSet({ lastSnapshot: snap });
+    this.root = root;
+    this.shadow = sh;
+    return root;
+  },
 
-      const resultsEl = sh.querySelector("#ps-results");
-      const statusEl = resultsEl.querySelector(".status") || (() => {
+  async populate() {
+    if (!this.shadow) return;
+    const sh = this.shadow;
+    const site = siteOf();
+    const D = DRIVERS[site] || DRIVERS.amazon;
+
+    const snap = {
+      title: D.getTitle(),
+      asin: D.getASIN ? D.getASIN() : null,
+      price_cents: D.getPriceCents ? D.getPriceCents() : null,
+      store_sku: D.getStoreSKU ? D.getStoreSKU() : null,
+    };
+    await safeSet({ lastSnapshot: snap });
+
+    const resultsEl = sh.querySelector("#ps-results");
+    const statusEl =
+      resultsEl.querySelector(".status") ||
+      (() => {
         const el = document.createElement("div");
         el.className = "status";
         resultsEl.prepend(el);
         return el;
       })();
-      statusEl.textContent = "Searching...";
+    statusEl.textContent = "Searching...";
 
-      const prodLabelEl = sh.querySelector(".asin-row strong");
-      const prodValEl = sh.querySelector("#ps-asin-val");
+    const prodLabelEl = sh.querySelector(".asin-row strong");
+    const prodValEl = sh.querySelector("#ps-asin-val");
 
-      if (prodLabelEl && prodValEl) {
-        if (site === "amazon") {
-          prodLabelEl.textContent = "ASIN";
-          prodValEl.textContent = snap.asin || "Not found";
-        } else if (site === "target") {
-          prodLabelEl.textContent = "TCIN";
-          prodValEl.textContent = snap.store_sku || "Not found";
-        } else {
-          prodLabelEl.textContent = "SKU";
-          prodValEl.textContent = snap.store_sku || "Not found";
-        }
-      }
-
-      let list = [];
-      let resolvedASIN = snap.asin;
-
+    if (prodLabelEl && prodValEl) {
       if (site === "amazon") {
-        if (!snap.asin) return (statusEl.textContent = "ASIN not found.");
-        const resp = await safeSend({
-          type: "COMPARE_REQUEST",
-          payload: { asin: snap.asin },
-        });
-        list = Array.isArray(resp?.results) ? resp.results.slice() : [];
+        prodLabelEl.textContent = "ASIN";
+        prodValEl.textContent = snap.asin || "Not found";
+      } else if (site === "target") {
+        prodLabelEl.textContent = "TCIN";
+        prodValEl.textContent = snap.store_sku || "Not found";
       } else {
-        if (!snap.store_sku) {
-          statusEl.textContent = "No product ID found.";
-          return;
-        }
-        const resp = await safeSend({
-          type: "RESOLVE_COMPARE_REQUEST",
-          payload: { store: D.store, store_sku: snap.store_sku },
-        });
-        resolvedASIN = resp?.asin || null;
-        list = Array.isArray(resp?.results) ? resp.results.slice() : [];
+        prodLabelEl.textContent = "SKU";
+        prodValEl.textContent = snap.store_sku || "Not found";
       }
+    }
 
-      // --- Brand + Category (from Amazon or any matching row) ---
-      const bcEl = sh.querySelector("#ps-variant-val");
-      if (bcEl) {
-        let src = list.find(r => (r.store || "").toLowerCase() === "amazon");
-        if (!src) src = list.find(r => r.brand || r.category);
-        const brand = src?.brand || "";
-        const category = src?.category || "";
-        const bc = [brand, category].filter(Boolean).join(" ");
-        bcEl.textContent = bc || "N/A";
-      }
+    let list = [];
+    let resolvedASIN = snap.asin;
 
-      statusEl.textContent = "";
-      if (!list.length) {
-        statusEl.textContent = "No prices found.";
+    if (site === "amazon") {
+      if (!snap.asin) {
+        statusEl.textContent = "ASIN not found.";
         return;
       }
-
-      list.sort((a, b) => (a.price_cents ?? Infinity) - (b.price_cents ?? Infinity));
-      const ICON = (k) => ICONS[k] || ICONS.default;
-
-      // render results
-      resultsEl.innerHTML = "";
-      list.forEach((p) => {
-        const card = document.createElement("a");
-        card.className = "result-card";
-        card.href = p.url || "#";
-        card.target = "_blank";
-        card.innerHTML = `
-          <div class="store-info">
-            <img src="${ICON(p.store?.toLowerCase())}" class="store-logo" />
-            <div class="store-and-product">
-              <span class="store-name">${p.store}</span>
-            </div>
-          </div>
-          <div class="price-info">
-            <span class="price">$${(p.price_cents / 100).toFixed(2)}</span>
-          </div>
-        `;
-        resultsEl.appendChild(card);
+      const resp = await safeSend({
+        type: "COMPARE_REQUEST",
+        payload: { asin: snap.asin },
       });
-    },
-
-    async openSidebar() {
-      await this.ensure();
-      this.open = true;
-      this.root.style.transform = "translateX(0%)";
-      await this.populate();
-    },
-    close() {
-      this.open = false;
-      this.root.style.transform = "translateX(-100%)";
-    },
-    toggle() {
-      this.open ? this.close() : this.openSidebar();
-    },
-    init() {
-      chrome.runtime?.onMessage.addListener((m) => {
-        if (m?.type === "TOGGLE_SIDEBAR") this.toggle();
+      list = Array.isArray(resp?.results) ? resp.results.slice() : [];
+    } else {
+      if (!snap.store_sku) {
+        statusEl.textContent = "No product ID found.";
+        return;
+      }
+      const resp = await safeSend({
+        type: "RESOLVE_COMPARE_REQUEST",
+        payload: { store: D.store, store_sku: snap.store_sku },
       });
-      globalThis.__PC_SINGLETON__ = this;
-    },
-  };
+      resolvedASIN = resp?.asin || null;
+      list = Array.isArray(resp?.results) ? resp.results.slice() : [];
+    }
+
+    const bcEl = sh.querySelector("#ps-variant-val");
+    if (bcEl) {
+      let src = list.find((r) => (r.store || "").toLowerCase() === "amazon");
+      if (!src) src = list.find((r) => r.brand || r.category);
+      const brand = src?.brand || "";
+      const category = src?.category || "";
+      const bc = [brand, category].filter(Boolean).join(" ");
+      bcEl.textContent = bc || "N/A";
+    }
+
+    statusEl.textContent = "";
+    if (!list.length) {
+      statusEl.textContent = "No prices found.";
+      // still update lastKey so watcher does not spam
+      this.lastKey = this.makeKey();
+      return;
+    }
+
+    list.sort(
+      (a, b) => (a.price_cents ?? Infinity) - (b.price_cents ?? Infinity)
+    );
+    const ICON = (k) => ICONS[k] || ICONS.default;
+
+    const currentStore = (D.store || "").toLowerCase();
+    const cheapestPrice = list[0]?.price_cents ?? null;
+    const currentRow = list.find(r => (r.store || "").toLowerCase() === currentStore);
+    const currentPrice = currentRow?.price_cents ?? null;
+
+    resultsEl.innerHTML = "";
+    list.forEach((p, idx) => {
+      const storeLower = (p.store || "").toLowerCase();
+      const isCurrentSite = storeLower === currentStore;
+      const isCheapest = cheapestPrice != null && p.price_cents === cheapestPrice;
+
+      let tagsHTML = "";
+
+      // Savings vs current site (only on other stores)
+      if (
+        currentPrice != null &&
+        p.price_cents != null &&
+        !isCurrentSite &&
+        p.price_cents < currentPrice
+      ) {
+        const diff = (currentPrice - p.price_cents) / 100;
+        if (diff >= 0.01) {
+          tagsHTML += `<span class="savings-tag">Save $${diff.toFixed(2)}</span>`;
+        }
+      }
+
+      // Best price badge
+      if (isCheapest) {
+        tagsHTML += `<span class="savings-tag best-price">Best price</span>`;
+      }
+
+      const card = document.createElement("a");
+      card.className = "result-card";
+      if (isCurrentSite) card.classList.add("current-site");
+
+      card.href = p.url || "#";
+      card.target = "_blank";
+      card.innerHTML = `
+        <div class="store-info">
+          <img src="${ICON(storeLower)}" class="store-logo" />
+          <div class="store-and-product">
+            <span class="store-name">${p.store}</span>
+          </div>
+        </div>
+        <div class="price-info">
+          <span class="price">$${(p.price_cents / 100).toFixed(2)}</span>
+          ${tagsHTML}
+        </div>
+      `;
+      resultsEl.appendChild(card);
+    });
+
+    // refresh the key after a successful populate
+    this.lastKey = this.makeKey();
+  },
+
+  async openSidebar() {
+    await this.ensure();
+    this.open = true;
+    this.root.style.transform = "translateX(0%)";
+    await this.populate();
+    this.startWatcher();
+  },
+
+  close() {
+    this.open = false;
+    this.root.style.transform = "translateX(-100%)";
+    this.stopWatcher();
+  },
+
+  toggle() {
+    this.open ? this.close() : this.openSidebar();
+  },
+
+  init() {
+    chrome.runtime?.onMessage.addListener((m) => {
+      if (m?.type === "TOGGLE_SIDEBAR") this.toggle();
+    });
+    globalThis.__PC_SINGLETON__ = this;
+  },
+};
+
 
   PS.init();
 })();

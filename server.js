@@ -60,7 +60,6 @@ app.get("/v1/resolve", async (req, res) => {
   }
 });
 
-// ---------- Compare (Amazon + listings) ----------
 app.get("/v1/compare", async (req, res) => {
   const asin = toASIN(req.query.asin);
   const upcNorm = normUPC(req.query.upc);
@@ -70,37 +69,52 @@ app.get("/v1/compare", async (req, res) => {
   try {
     const sql = `
       WITH base AS (
-        SELECT asin, upc, brand, category, model_name, model_number,
+        SELECT asin, upc, pc_code, brand, category, model_name, model_number,
                variant_label, current_price_cents, current_price_observed_at
         FROM public.asins
         WHERE (($1)::text IS NOT NULL AND upper(btrim(asin)) = upper(btrim(($1)::text)))
            OR (($2)::text IS NOT NULL AND public.norm_upc(upc) = public.norm_upc(($2)::text))
+        ORDER BY current_price_observed_at DESC NULLS LAST, id DESC
         LIMIT 1
       )
       SELECT
         'Amazon'::text AS store,
         b.asin, b.upc, b.current_price_cents AS price_cents,
         b.current_price_observed_at AS observed_at,
-        NULL::text AS url,
-        b.brand, b.category, b.model_name, b.model_number, b.variant_label
+        ('https://www.amazon.com/dp/' || b.asin) AS url,
+        b.brand, b.category, b.model_name, b.model_number, b.variant_label,
+        b.pc_code
       FROM base b
       WHERE b.current_price_cents IS NOT NULL
 
       UNION ALL
 
       SELECT
-        l.store, NULL::text AS asin, l.upc, l.current_price_cents, l.current_price_observed_at,
-        l.url, NULL::text, NULL::text, NULL::text, NULL::text, l.variant_label
+        l.store,
+        NULL::text AS asin,
+        l.upc,
+        l.current_price_cents,
+        l.current_price_observed_at,
+        l.url,
+        NULL::text, NULL::text, NULL::text, NULL::text,
+        l.variant_label,
+        l.pc_code
       FROM public.listings l
-      JOIN base b ON public.norm_upc(l.upc) = public.norm_upc(b.upc)
+      JOIN base b ON (
+        (b.upc IS NOT NULL AND btrim(b.upc) <> '' AND public.norm_upc(l.upc) = public.norm_upc(b.upc))
+        OR
+        ((b.upc IS NULL OR btrim(b.upc) = '') AND b.pc_code IS NOT NULL AND btrim(b.pc_code) <> '' AND l.pc_code = b.pc_code)
+      )
       ORDER BY price_cents ASC NULLS LAST, store ASC;
     `;
 
     const { rows } = await pool.query(sql, [asin || null, upcNorm || null]);
+
     const out = rows.map((r) => ({
       store: r.store,
       asin: r.asin || asin || null,
       upc: r.upc,
+      pc_code: r.pc_code || null,
       price_cents: r.price_cents,
       seen_at: r.observed_at,
       url: r.url || (r.asin ? `https://www.amazon.com/dp/${r.asin}` : null),
@@ -117,7 +131,6 @@ app.get("/v1/compare", async (req, res) => {
   }
 });
 
-// ---------- Compare by store_sku (Target/Walmart/BestBuy → Amazon) ----------
 app.get("/v1/compare_by_store_sku", async (req, res) => {
   const store = normStore(req.query.store);
   const storeSku = String(req.query.store_sku || "").trim();
@@ -126,9 +139,9 @@ app.get("/v1/compare_by_store_sku", async (req, res) => {
     return res.status(400).json({ asin: null, results: [], error: "store and store_sku required" });
 
   try {
-    // Step 1: find UPC from listings by store + store_sku
+    // Step 1: find UPC and pc_code from listings by store + store_sku
     const r1 = await pool.query(
-      `SELECT upc
+      `SELECT upc, pc_code
          FROM public.listings
         WHERE lower(btrim(store)) = lower(btrim($1))
           AND public.norm_sku(store_sku) = public.norm_sku($2)
@@ -138,34 +151,41 @@ app.get("/v1/compare_by_store_sku", async (req, res) => {
     );
 
     const upc = r1.rows[0]?.upc ? normUPC(r1.rows[0].upc) : null;
-    if (!upc) return res.json({ asin: null, results: [] });
+    const pc_code = r1.rows[0]?.pc_code ? String(r1.rows[0].pc_code).trim() : null;
 
-    // Step 2: Find Amazon ASIN (if exists)
+    if (!upc && !pc_code) return res.json({ asin: null, results: [] });
+
+    // Step 2: Find Amazon ASIN (optional)
+    // Prefer UPC lookup when present; else use pc_code
     const r2 = await pool.query(
-      `SELECT asin
-         FROM public.asins
-        WHERE public.norm_upc(upc) = public.norm_upc($1)
-        LIMIT 1`,
-      [upc]
+      upc
+        ? `SELECT asin FROM public.asins WHERE public.norm_upc(upc) = public.norm_upc($1) LIMIT 1`
+        : `SELECT asin FROM public.asins WHERE pc_code = $1 LIMIT 1`,
+      [upc || pc_code]
     );
-
     const asin = r2.rows[0]?.asin || null;
 
-    // Step 3: Reuse main compare logic by UPC
+    // Step 3: Compare using the same rule: UPC if present else pc_code
     const sql = `
       WITH base AS (
-        SELECT asin, upc, brand, category, model_name, model_number,
+        SELECT asin, upc, pc_code, brand, category, model_name, model_number,
                variant_label, current_price_cents, current_price_observed_at
         FROM public.asins
-        WHERE public.norm_upc(upc) = public.norm_upc(($1)::text)
+        WHERE (
+          ($1::text IS NOT NULL AND public.norm_upc(upc) = public.norm_upc($1::text))
+          OR
+          ($1::text IS NULL AND $2::text IS NOT NULL AND pc_code = $2::text)
+        )
+        ORDER BY current_price_observed_at DESC NULLS LAST, id DESC
         LIMIT 1
       )
       SELECT
-      'Amazon'::text AS store,
-      b.asin, b.upc, b.current_price_cents AS price_cents,
-      b.current_price_observed_at AS observed_at,
-      ('https://www.amazon.com/dp/' || b.asin) AS url,
-        b.brand, b.category, b.model_name, b.model_number, b.variant_label
+        'Amazon'::text AS store,
+        b.asin, b.upc, b.current_price_cents AS price_cents,
+        b.current_price_observed_at AS observed_at,
+        ('https://www.amazon.com/dp/' || b.asin) AS url,
+        b.brand, b.category, b.model_name, b.model_number, b.variant_label,
+        b.pc_code
       FROM base b
       WHERE b.current_price_cents IS NOT NULL
 
@@ -173,13 +193,18 @@ app.get("/v1/compare_by_store_sku", async (req, res) => {
 
       SELECT
         l.store, NULL::text AS asin, l.upc, l.current_price_cents, l.current_price_observed_at,
-        l.url, NULL::text, NULL::text, NULL::text, NULL::text, l.variant_label
+        l.url, NULL::text, NULL::text, NULL::text, NULL::text, l.variant_label,
+        l.pc_code
       FROM public.listings l
-      JOIN base b ON public.norm_upc(l.upc) = public.norm_upc(b.upc)
+      JOIN base b ON (
+        (b.upc IS NOT NULL AND btrim(b.upc) <> '' AND public.norm_upc(l.upc) = public.norm_upc(b.upc))
+        OR
+        ((b.upc IS NULL OR btrim(b.upc) = '') AND b.pc_code IS NOT NULL AND btrim(b.pc_code) <> '' AND l.pc_code = b.pc_code)
+      )
       ORDER BY price_cents ASC NULLS LAST, store ASC;
     `;
 
-    const { rows } = await pool.query(sql, [upc]);
+    const { rows } = await pool.query(sql, [upc || null, pc_code || null]);
     res.json({ asin, results: rows });
   } catch (e) {
     console.error("compare_by_store_sku error:", e);
@@ -191,6 +216,7 @@ app.get("/v1/compare_by_store_sku", async (req, res) => {
 // ---------- Observe ----------
 app.post("/v1/observe", async (req, res) => {
   const {
+    pc_code,
     store,
     asin,
     upc,
@@ -207,6 +233,7 @@ app.post("/v1/observe", async (req, res) => {
   } = req.body || {};
 
   const storeNorm = normStore(store);
+  const pc = pc_code ? String(pc_code).trim() : null;
   const asinUp = asin ? toASIN(asin) : null;
   const upcNorm = normUPC(upc);
   const cents = Number.isFinite(price_cents) ? price_cents : null;
@@ -222,15 +249,16 @@ app.post("/v1/observe", async (req, res) => {
       await client.query(
         `
         INSERT INTO public.asins (
-          asin, upc, current_price_cents, current_price_observed_at,
+          asin, upc, pc_code, current_price_cents, current_price_observed_at,
           brand, category, variant_label, model_name, model_number, created_at
         )
         VALUES (
-          $1, $2, $3, COALESCE($4::timestamptz, now()),
-          $5, $6, $7, $8, $9, now()
+          $1, $2, $3, $4, COALESCE($5::timestamptz, now()),
+          $6, $7, $8, $9, $10, now()
         )
         ON CONFLICT (asin)
         DO UPDATE SET
+          pc_code = COALESCE(EXCLUDED.pc_code, asins.pc_code),
           upc = COALESCE(EXCLUDED.upc, asins.upc),
           current_price_cents = EXCLUDED.current_price_cents,
           current_price_observed_at = EXCLUDED.current_price_observed_at,
@@ -243,6 +271,7 @@ app.post("/v1/observe", async (req, res) => {
         [
           asinUp,
           upcNorm || null,
+          pc || null,
           cents,
           observed_at || null,
           brand || null,
@@ -255,9 +284,9 @@ app.post("/v1/observe", async (req, res) => {
     } else {
       await client.query(
         `
-        INSERT INTO public.listings (store, upc, store_sku, url, status,
+        INSERT INTO public.listings (store, upc, pc_code, store_sku, url, status,
           current_price_cents, current_price_observed_at, variant_label)
-        VALUES ($1, $2, $3, $4, 'active', $5, COALESCE($6::timestamptz, now()), $7)
+        VALUES ($1, $2, $3, $4, $5, 'active', $6, COALESCE($7::timestamptz, now()), $8)
         ON CONFLICT (store, upc)
         DO UPDATE SET
           store_sku = COALESCE(EXCLUDED.store_sku, listings.store_sku),
@@ -270,6 +299,7 @@ app.post("/v1/observe", async (req, res) => {
         [
           storeNorm,
           upcNorm || null,
+          pc || null,
           store_sku || null,
           url || null,
           cents,
