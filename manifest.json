@@ -3,15 +3,15 @@
   "name": "PriceCheck: Your All-in-One Shopping Assistant",
   "version": "0.8.6",
   "description": "PriceCheck instantly compares prices across stores to help you find the best deal.",
-  "action": {},
-  "permissions": ["scripting", "activeTab", "storage"],
+  "action": {"default_title":"Toggle PriceCheck"},
+  "permissions": ["scripting", "storage"],
   "host_permissions": [
     "https://*.amazon.com/*",
     "https://*.target.com/*",
     "https://*.walmart.com/*",
     "https://*.bestbuy.com/*",
     "https://*.apple.com/*",
-    "https://pricecheck-extension.onrender.com/*"
+    "https://pricecheck-extension.onrender.com/"
   ],
   "background": { "service_worker": "background.js" },
   "icons": {
