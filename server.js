@@ -43,7 +43,7 @@ app.get("/health", (_req, res) =>
 
 // ---------- UPC → ASIN ----------
 app.get("/v1/resolve", async (req, res) => {
-  const upcNorm = normUPC(req.query.store_key);
+  const upcNorm = normUPC(req.query.upc);
   if (!upcNorm) return res.json({ asin: null });
   try {
     const { rows } = await pool.query(

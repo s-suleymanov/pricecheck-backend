@@ -258,7 +258,11 @@
     target: chrome.runtime.getURL("icons/target-circle.png"),
     walmart: chrome.runtime.getURL("icons/walmart.png"),
     bestbuy: chrome.runtime.getURL("icons/bestbuy.png"),
+    apple: chrome.runtime.getURL("icons/apple.png"),
+    samsung: chrome.runtime.getURL("icons/samsung.png"),
+    lg: chrome.runtime.getURL("icons/lg.png"),
     default: chrome.runtime.getURL("icons/logo.png"),
+    dji: chrome.runtime.getURL("icons/dji.png"),
   };
 
   const __cache = new Map();
@@ -451,40 +455,40 @@
       return;
     }
 
-    list.sort(
-      (a, b) => (a.price_cents ?? Infinity) - (b.price_cents ?? Infinity)
-    );
+    // Only keep entries with real prices
+    const priced = list.filter(p => Number.isFinite(p?.price_cents));
+    if (!priced.length) {
+      statusEl.textContent = "No prices found.";
+      this.lastKey = this.makeKey();
+      return;
+    }
+
+    // Sort cheapest → most expensive
+    priced.sort((a, b) => a.price_cents - b.price_cents);
+
     const ICON = (k) => ICONS[k] || ICONS.default;
 
     const currentStore = (D.store || "").toLowerCase();
-    const cheapestPrice = list[0]?.price_cents ?? null;
-    const currentRow = list.find(r => (r.store || "").toLowerCase() === currentStore);
+    const currentRow = priced.find(
+      r => (r.store || "").toLowerCase() === currentStore
+    );
     const currentPrice = currentRow?.price_cents ?? null;
 
+    const cheapestPrice = priced[0].price_cents;
+    const mostExpensivePrice = priced[priced.length - 1].price_cents;
+
     resultsEl.innerHTML = "";
-    list.forEach((p, idx) => {
+
+    priced.forEach(p => {
       const storeLower = (p.store || "").toLowerCase();
       const isCurrentSite = storeLower === currentStore;
-      const isCheapest = cheapestPrice != null && p.price_cents === cheapestPrice;
 
       let tagsHTML = "";
 
-      // Savings vs current site (only on other stores)
-      if (
-        currentPrice != null &&
-        p.price_cents != null &&
-        !isCurrentSite &&
-        p.price_cents < currentPrice
-      ) {
-        const diff = (currentPrice - p.price_cents) / 100;
-        if (diff >= 0.01) {
-          tagsHTML += `<span class="savings-tag">Save $${diff.toFixed(2)}</span>`;
-        }
-      }
-
-      // Best price badge
-      if (isCheapest) {
-        tagsHTML += `<span class="savings-tag best-price">Best price</span>`;
+      // GLOBAL savings: cheapest vs most expensive
+      if (p.price_cents === cheapestPrice && mostExpensivePrice > cheapestPrice) {
+        const diff = (mostExpensivePrice - cheapestPrice) / 100;
+        tagsHTML += `<span class="savings-tag">Save $${diff.toFixed(2)}</span>`;
       }
 
       const card = document.createElement("a");
@@ -507,6 +511,7 @@
       `;
       resultsEl.appendChild(card);
     });
+
 
     // refresh the key after a successful populate
     this.lastKey = this.makeKey();
