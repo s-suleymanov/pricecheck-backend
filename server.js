@@ -1,4 +1,4 @@
-// server.js — fixed join logic (UPC OR pc_code) + normalized compare_by_store_sku output
+// server.js — fixed join logic (UPC OR pci) + normalized compare_by_store_sku output
 const express = require("express");
 const { Pool } = require("pg");
 
@@ -75,7 +75,7 @@ app.get("/v1/compare", async (req, res) => {
   try {
     const sql = `
       WITH base AS (
-        SELECT asin, upc, pc_code, brand, category, model_name, model_number,
+        SELECT asin, upc, pci, brand, category, model_name, model_number,
                variant_label, current_price_cents, current_price_observed_at
         FROM public.asins
         WHERE (($1)::text IS NOT NULL AND upper(btrim(asin)) = upper(btrim(($1)::text)))
@@ -96,14 +96,14 @@ app.get("/v1/compare", async (req, res) => {
           NULL::text AS model_name,
           NULL::text AS model_number,
           l.variant_label,
-          l.pc_code,
+          l.pci,
           CASE
             WHEN b.upc IS NOT NULL AND btrim(b.upc) <> ''
              AND l.upc IS NOT NULL AND btrim(l.upc) <> ''
              AND public.norm_upc(l.upc) = public.norm_upc(b.upc) THEN 2
-            WHEN b.pc_code IS NOT NULL AND btrim(b.pc_code) <> ''
-             AND l.pc_code IS NOT NULL AND btrim(l.pc_code) <> ''
-             AND btrim(l.pc_code) = btrim(b.pc_code) THEN 1
+            WHEN b.pci IS NOT NULL AND btrim(b.pci) <> ''
+             AND l.pci IS NOT NULL AND btrim(l.pci) <> ''
+             AND btrim(l.pci) = btrim(b.pci) THEN 1
             ELSE 0
           END AS match_strength
         FROM public.listings l
@@ -115,9 +115,9 @@ app.get("/v1/compare", async (req, res) => {
           )
           OR
           (
-            b.pc_code IS NOT NULL AND btrim(b.pc_code) <> ''
-            AND l.pc_code IS NOT NULL AND btrim(l.pc_code) <> ''
-            AND btrim(l.pc_code) = btrim(b.pc_code)
+            b.pci IS NOT NULL AND btrim(b.pci) <> ''
+            AND l.pci IS NOT NULL AND btrim(l.pci) <> ''
+            AND btrim(l.pci) = btrim(b.pci)
           )
         )
       )
@@ -133,7 +133,7 @@ app.get("/v1/compare", async (req, res) => {
         b.model_name,
         b.model_number,
         b.variant_label,
-        b.pc_code,
+        b.pci,
         3 AS match_strength
       FROM base b
       WHERE b.current_price_cents IS NOT NULL
@@ -152,7 +152,7 @@ app.get("/v1/compare", async (req, res) => {
         model_name,
         model_number,
         variant_label,
-        pc_code,
+        pci,
         match_strength
       FROM listings_match
 
@@ -165,7 +165,7 @@ app.get("/v1/compare", async (req, res) => {
       store: r.store,
       asin: r.asin || asin || null,
       upc: r.upc,
-      pc_code: r.pc_code || null,
+      pci: r.pci || null,
       price_cents: Number.isFinite(r.price_cents) ? r.price_cents : null,
       seen_at: r.observed_at || null,
       url: r.url || (r.asin ? `https://www.amazon.com/dp/${r.asin}` : null),
@@ -195,9 +195,9 @@ app.get("/v1/compare_by_store_sku", async (req, res) => {
   }
 
   try {
-    // Step 1: find UPC and pc_code from listings by store + store_sku
+    // Step 1: find UPC and pci from listings by store + store_sku
     const r1 = await pool.query(
-      `SELECT upc, pc_code
+      `SELECT upc, pci
          FROM public.listings
         WHERE lower(btrim(store)) = lower(btrim($1))
           AND public.norm_sku(store_sku) = public.norm_sku($2)
@@ -207,30 +207,30 @@ app.get("/v1/compare_by_store_sku", async (req, res) => {
     );
 
     const upc = r1.rows[0]?.upc ? normUPC(r1.rows[0].upc) : null;
-    const pc_code = r1.rows[0]?.pc_code ? normPcCode(r1.rows[0].pc_code) : null;
+    const pci = r1.rows[0]?.pci ? normPcCode(r1.rows[0].pci) : null;
 
-    if (!upc && !pc_code) return res.json({ asin: null, results: [] });
+    if (!upc && !pci) return res.json({ asin: null, results: [] });
 
     // Step 2: Find Amazon ASIN (optional, for convenience)
-    // Prefer UPC lookup when present; else use pc_code
+    // Prefer UPC lookup when present; else use pci
     const r2 = await pool.query(
       upc
         ? `SELECT asin FROM public.asins WHERE public.norm_upc(upc) = public.norm_upc($1) LIMIT 1`
-        : `SELECT asin FROM public.asins WHERE btrim(pc_code) = btrim($1) LIMIT 1`,
-      [upc || pc_code]
+        : `SELECT asin FROM public.asins WHERE btrim(pci) = btrim($1) LIMIT 1`,
+      [upc || pci]
     );
     const asin = r2.rows[0]?.asin || null;
 
-    // Step 3: Compare using both keys (UPC OR pc_code)
+    // Step 3: Compare using both keys (UPC OR pci)
     const sql = `
       WITH base AS (
-        SELECT asin, upc, pc_code, brand, category, model_name, model_number,
+        SELECT asin, upc, pci, brand, category, model_name, model_number,
                variant_label, current_price_cents, current_price_observed_at
         FROM public.asins
         WHERE (
           ($1::text IS NOT NULL AND public.norm_upc(upc) = public.norm_upc($1::text))
           OR
-          ($2::text IS NOT NULL AND btrim(pc_code) = btrim($2::text))
+          ($2::text IS NOT NULL AND btrim(pci) = btrim($2::text))
         )
         ORDER BY current_price_observed_at DESC NULLS LAST, id DESC
         LIMIT 1
@@ -248,14 +248,14 @@ app.get("/v1/compare_by_store_sku", async (req, res) => {
           NULL::text AS model_name,
           NULL::text AS model_number,
           l.variant_label,
-          l.pc_code,
+          l.pci,
           CASE
             WHEN b.upc IS NOT NULL AND btrim(b.upc) <> ''
              AND l.upc IS NOT NULL AND btrim(l.upc) <> ''
              AND public.norm_upc(l.upc) = public.norm_upc(b.upc) THEN 2
-            WHEN b.pc_code IS NOT NULL AND btrim(b.pc_code) <> ''
-             AND l.pc_code IS NOT NULL AND btrim(l.pc_code) <> ''
-             AND btrim(l.pc_code) = btrim(b.pc_code) THEN 1
+            WHEN b.pci IS NOT NULL AND btrim(b.pci) <> ''
+             AND l.pci IS NOT NULL AND btrim(l.pci) <> ''
+             AND btrim(l.pci) = btrim(b.pci) THEN 1
             ELSE 0
           END AS match_strength
         FROM public.listings l
@@ -267,9 +267,9 @@ app.get("/v1/compare_by_store_sku", async (req, res) => {
           )
           OR
           (
-            b.pc_code IS NOT NULL AND btrim(b.pc_code) <> ''
-            AND l.pc_code IS NOT NULL AND btrim(l.pc_code) <> ''
-            AND btrim(l.pc_code) = btrim(b.pc_code)
+            b.pci IS NOT NULL AND btrim(b.pci) <> ''
+            AND l.pci IS NOT NULL AND btrim(l.pci) <> ''
+            AND btrim(l.pci) = btrim(b.pci)
           )
         )
       )
@@ -285,7 +285,7 @@ app.get("/v1/compare_by_store_sku", async (req, res) => {
         b.model_name,
         b.model_number,
         b.variant_label,
-        b.pc_code,
+        b.pci,
         3 AS match_strength
       FROM base b
       WHERE b.current_price_cents IS NOT NULL
@@ -304,20 +304,20 @@ app.get("/v1/compare_by_store_sku", async (req, res) => {
         model_name,
         model_number,
         variant_label,
-        pc_code,
+        pci,
         match_strength
       FROM listings_match
 
       ORDER BY match_strength DESC, price_cents ASC NULLS LAST, store ASC;
     `;
 
-    const { rows } = await pool.query(sql, [upc || null, pc_code || null]);
+    const { rows } = await pool.query(sql, [upc || null, pci || null]);
 
     const out = rows.map((r) => ({
       store: r.store,
       asin: r.asin || asin || null,
       upc: r.upc,
-      pc_code: r.pc_code || null,
+      pci: r.pci || null,
       price_cents: Number.isFinite(r.price_cents) ? r.price_cents : null,
       seen_at: r.observed_at || null,
       url: r.url || (r.asin ? `https://www.amazon.com/dp/${r.asin}` : null),
@@ -338,7 +338,7 @@ app.get("/v1/compare_by_store_sku", async (req, res) => {
 // ---------- Observe ----------
 app.post("/v1/observe", async (req, res) => {
   const {
-    pc_code,
+    pci,
     store,
     asin,
     upc,
@@ -355,7 +355,7 @@ app.post("/v1/observe", async (req, res) => {
   } = req.body || {};
 
   const storeNorm = normStore(store);
-  const pc = pc_code ? normPcCode(pc_code) : null;
+  const pc = pci ? normPcCode(pci) : null;
   const asinUp = asin ? toASIN(asin) : null;
   const upcNorm = normUPC(upc);
   const cents = Number.isFinite(price_cents) ? price_cents : null;
@@ -372,7 +372,7 @@ app.post("/v1/observe", async (req, res) => {
       await client.query(
         `
         INSERT INTO public.asins (
-          asin, upc, pc_code, current_price_cents, current_price_observed_at,
+          asin, upc, pci, current_price_cents, current_price_observed_at,
           brand, category, variant_label, model_name, model_number, created_at
         )
         VALUES (
@@ -381,7 +381,7 @@ app.post("/v1/observe", async (req, res) => {
         )
         ON CONFLICT (asin)
         DO UPDATE SET
-          pc_code = COALESCE(EXCLUDED.pc_code, asins.pc_code),
+          pci = COALESCE(EXCLUDED.pci, asins.pci),
           upc = COALESCE(EXCLUDED.upc, asins.upc),
           current_price_cents = EXCLUDED.current_price_cents,
           current_price_observed_at = EXCLUDED.current_price_observed_at,
@@ -408,7 +408,7 @@ app.post("/v1/observe", async (req, res) => {
       await client.query(
         `
         INSERT INTO public.listings (
-          store, upc, pc_code, store_sku, url, status,
+          store, upc, pci, store_sku, url, status,
           current_price_cents, current_price_observed_at, variant_label
         )
         VALUES ($1, $2, $3, $4, $5, 'active', $6, COALESCE($7::timestamptz, now()), $8)

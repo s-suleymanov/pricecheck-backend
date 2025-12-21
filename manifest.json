@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "PriceCheck: Your All-in-One Shopping Assistant",
-  "version": "0.8.6",
+  "version": "0.8.7",
   "description": "PriceCheck instantly compares prices across stores to help you find the best deal.",
   "action": {"default_title":"Toggle PriceCheck"},
   "permissions": ["scripting", "storage"],
