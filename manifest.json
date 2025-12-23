@@ -11,7 +11,9 @@
     "https://*.walmart.com/*",
     "https://*.bestbuy.com/*",
     "https://*.apple.com/*",
-    "https://pricecheck-extension.onrender.com/"
+    "https://*.segway.com/*",
+    "https://*.dji.com/*",
+    "https://pricecheck-extension.onrender.com/*"
   ],
   "background": { "service_worker": "background.js" },
   "icons": {

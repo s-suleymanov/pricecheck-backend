@@ -159,7 +159,32 @@ app.get("/v1/compare", async (req, res) => {
       ORDER BY match_strength DESC, price_cents ASC NULLS LAST, store ASC;
     `;
 
-    const { rows } = await pool.query(sql, [asin || null, upcNorm || null]);
+    let { rows } = await pool.query(sql, [asin || null, upcNorm || null]);
+
+    if ((!rows || rows.length === 0) && upcNorm) {
+      const fb = await pool.query(`
+        SELECT
+          l.store,
+          NULL::text AS asin,
+          l.upc,
+          l.current_price_cents AS price_cents,
+          l.current_price_observed_at AS observed_at,
+          l.url,
+          NULL::text AS brand,
+          NULL::text AS category,
+          NULL::text AS model_name,
+          NULL::text AS model_number,
+          l.variant_label,
+          l.pci,
+          2 AS match_strength
+        FROM public.listings l
+        WHERE l.upc IS NOT NULL AND btrim(l.upc) <> ''
+          AND public.norm_upc(l.upc) = public.norm_upc($1::text)
+        ORDER BY price_cents ASC NULLS LAST, store ASC
+      `, [upcNorm]);
+
+      rows = fb.rows;
+    }
 
     const out = rows.map((r) => ({
       store: r.store,
@@ -311,7 +336,49 @@ app.get("/v1/compare_by_store_sku", async (req, res) => {
       ORDER BY match_strength DESC, price_cents ASC NULLS LAST, store ASC;
     `;
 
-    const { rows } = await pool.query(sql, [upc || null, pci || null]);
+    let { rows } = await pool.query(sql, [upc || null, pci || null]);
+
+    // Fallback: if base (asins) is missing, match listings directly by UPC/PCI
+    if (!rows || rows.length === 0) {
+      const sqlListingsOnly = `
+        SELECT
+          l.store,
+          NULL::text AS asin,
+          l.upc,
+          l.current_price_cents AS price_cents,
+          l.current_price_observed_at AS observed_at,
+          l.url,
+          NULL::text AS brand,
+          NULL::text AS category,
+          NULL::text AS model_name,
+          NULL::text AS model_number,
+          l.variant_label,
+          l.pci,
+          CASE
+            WHEN $1::text IS NOT NULL AND l.upc IS NOT NULL AND btrim(l.upc) <> ''
+            AND public.norm_upc(l.upc) = public.norm_upc($1::text) THEN 2
+            WHEN $2::text IS NOT NULL AND l.pci IS NOT NULL AND btrim(l.pci) <> ''
+            AND btrim(l.pci) = btrim($2::text) THEN 1
+            ELSE 0
+          END AS match_strength
+        FROM public.listings l
+        WHERE
+          (
+            $1::text IS NOT NULL AND l.upc IS NOT NULL AND btrim(l.upc) <> ''
+            AND public.norm_upc(l.upc) = public.norm_upc($1::text)
+          )
+          OR
+          (
+            $2::text IS NOT NULL AND l.pci IS NOT NULL AND btrim(l.pci) <> ''
+            AND btrim(l.pci) = btrim($2::text)
+          )
+        ORDER BY match_strength DESC, price_cents ASC NULLS LAST, store ASC;
+      `;
+
+      const fb = await pool.query(sqlListingsOnly, [upc || null, pci || null]);
+      rows = fb.rows;
+    }
+
 
     const out = rows.map((r) => ({
       store: r.store,
@@ -434,11 +501,11 @@ app.post("/v1/observe", async (req, res) => {
       );
     }
 
-    await client.query(
-      `INSERT INTO public.price_history (store, asin, upc, price_cents, observed_at, url, title)
-       VALUES ($1, $2, $3, $4, COALESCE($5::timestamptz, now()), $6, $7)`,
-      [storeNorm, asinUp, upcNorm || null, cents, observed_at, url, title]
-    );
+  await client.query(
+  `INSERT INTO public.price_history (store, asin, upc, store_sku, pci, price_cents, observed_at, url, title)
+   VALUES ($1, $2, $3, $4, $5, $6, COALESCE($7::timestamptz, now()), $8, $9)`,
+  [storeNorm, asinUp, upcNorm || null, store_sku || null, pc || null, cents, observed_at, url, title]
+);
 
     await client.query("COMMIT");
     res.json({ ok: true });

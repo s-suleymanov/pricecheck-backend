@@ -49,6 +49,14 @@
     return isNaN(n) ? null : Math.round(n * 100);
   };
 
+  const storeKey = (s) => String(s || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+
+  const storeLabel = (s) => {
+    const k = storeKey(s);
+    if (k === "bestbuy") return "Best Buy";
+    return s || "Unknown";
+  };
+
   const normalizeUPC = (raw) => {
     let k = String(raw || "").replace(/[^0-9]/g, "");
     if (k.length === 14 && k.startsWith("0")) k = k.slice(1);
@@ -261,6 +269,7 @@
     apple: chrome.runtime.getURL("icons/apple.png"),
     samsung: chrome.runtime.getURL("icons/samsung.png"),
     lg: chrome.runtime.getURL("icons/lg.png"),
+    segway: chrome.runtime.getURL("icons/segway.png"),
     default: chrome.runtime.getURL("icons/logo.png"),
     dji: chrome.runtime.getURL("icons/dji.png"),
   };
@@ -501,7 +510,7 @@
         <div class="store-info">
           <img src="${ICON(storeLower)}" class="store-logo" />
           <div class="store-and-product">
-            <span class="store-name">${p.store}</span>
+            <span class="store-name">${storeLabel(p.store)}</span>
           </div>
         </div>
         <div class="price-info">
