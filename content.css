@@ -1,6 +1,5 @@
 :host { all: initial; }
 
-/* Panel */
 .panel {
   box-sizing: border-box; height: 100vh; width: 100%;
   background-color: #f8f8f8; font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
@@ -8,7 +7,6 @@
   overflow: hidden; border-right: 1px solid #e0e0e0;
 }
 
-/* Header */
 .header {
   padding: 12px 16px; display: flex; align-items: center; justify-content: space-between;
   background-color: #ffffff; border-bottom: 1px solid #f0f0f0; flex-shrink: 0;
@@ -19,7 +17,6 @@
 .subtitle { font-size: 13px; color: #777; }
 .xbtn { border: none; background: transparent; color: #888; font-size: 28px; cursor: pointer; padding: 0 4px; line-height: 1; }
 .xbtn:hover { color: #333; }
-
 
 .subheader {
   background: #fff;
@@ -33,14 +30,12 @@
   color: #555;
 }
 
-
 .asin-row,
 .variant-row {
   display: grid;
   grid-template-columns: 80px 1fr;  
   align-items: start;
 }
-
 
 .asin-row strong,
 .variant-row strong {
@@ -72,28 +67,24 @@
   line-height: 1.25; 
 }
 
-
-
-/* Content & Results */
 .content { padding: 16px; overflow-y: auto; flex-grow: 1; }
 #ps-results { display: flex; flex-direction: column; gap: 10px; }
 .status { color: #999; text-align: center; padding: 40px 0; font-size: 14px; }
 
 .store-note {
   font-size: 12px;
-  color: #666;       /* was var(--muted) which may be undefined */
+  color: #666; 
   margin-top: 2px;
   line-height: 1.25;
 }
 
-
-/* Result Card */
 .result-card {
   display: flex; align-items: center; justify-content: space-between;
   background: #ffffff; color: #333; border-radius: 8px;
   padding: 14px 16px; text-decoration: none; border: 1px solid #e0e0e0;
   transition: all 0.1s ease-in-out;
 }
+
 .result-card:hover { border-color: #007bff; }
 .result-card.current-site { border: 2px solid #007bff; padding: 13px 15px; }
 .store-info { display: flex; align-items: center; gap: 12px; }
@@ -106,17 +97,58 @@
 .savings-tag { background-color: #28a745; color: white; padding: 3px 8px; border-radius: 12px; font-size: 12px; font-weight: 500; }
 .savings-tag.best-price { background-color: #ffc107; color: #333; }
 
-/* Resizer & Footer */
 .resize { position: absolute; right: -3px; top: 0; width: 6px; height: 100%; cursor: ew-resize; z-index: 10; }
-.footer {
-  padding: 10px 16px;
+.footer{
+  padding: 12px 16px;
   background: #ffffff;
   border-top: 1px solid #f0f0f0;
-  font-size: 11px;
-  color: #999;
   flex-shrink: 0;
-  text-align: center;
-  margin-bottom: 15px;
+  display: flex;
+  justify-content: center;
+}
+
+.footer-cta{
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+
+  padding: 10px 12px;
+  border-radius: 999px;
+
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.2px;
+
+  color: #111;
+  background: #f5f7ff;
+  border: 1px solid #e6eaff;
+
+  text-decoration: none;
+  user-select: none;
+
+  transition: transform 120ms ease, box-shadow 120ms ease, background 120ms ease, border-color 120ms ease;
+}
+
+.footer-cta:hover{
+  background: #eef3ff;
+  border-color: #cfd9ff;
+  box-shadow: 0 6px 18px rgba(0,0,0,0.10);
+  transform: translateY(-1px);
+}
+
+.footer-cta:active{
+  transform: translateY(0px);
+  box-shadow: 0 2px 10px rgba(0,0,0,0.08);
+}
+
+.footer-cta:focus{
+  outline: none;
+}
+
+.footer-cta:focus-visible{
+  outline: 2px solid #7aa7ff;
+  outline-offset: 2px;
 }
 
 .footer-link {
@@ -128,4 +160,34 @@
   color: #007bff;
   text-decoration: underline;
   cursor: pointer;
+}
+
+.store-line{
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.offer-pill{
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 8px;
+  border-radius: 999px;
+  margin-top: 1px;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1;
+  color: #111;
+  background: #f1f3f5;
+  border: 1px solid #e6e8eb;
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.offer-pill--current{
+  background: #eaf2ff;
+  border-color: #cfe0ff;
 }

@@ -266,6 +266,22 @@
     },
   };
 
+  function escHtml(s) {
+    return String(s ?? "")
+      .replaceAll("&", "&amp;")
+      .replaceAll("<", "&lt;")
+      .replaceAll(">", "&gt;")
+      .replaceAll('"', "&quot;")
+      .replaceAll("'", "&#39;");
+  }
+
+  function offerTagPill(offer_tag, isCurrent = false) {
+    const t = String(offer_tag || "").trim();
+    if (!t) return "";
+    const cls = isCurrent ? "offer-pill offer-pill--current" : "offer-pill";
+    return `<span class="${cls}">${escHtml(t)}</span>`;
+  }
+
   // ---------- assets ----------
   const HTML_URL = chrome.runtime.getURL("content.html");
   const CSS_URL = chrome.runtime.getURL("content.css");
@@ -289,6 +305,25 @@
     const text = await res.text();
     __cache.set(url, text);
     return text;
+  }
+  
+  const DASHBOARD_BASE = "https://www.pricechecktool.com/dashboard/";
+
+  function dashboardUrlForKey(key) {
+    if (!key) return DASHBOARD_BASE;
+    return `${DASHBOARD_BASE}?key=${encodeURIComponent(key)}`;
+  }
+
+  function keyForCurrentPage(site, snap) {
+    const asin = (snap?.asin || "").trim().toUpperCase();
+    const sku  = (snap?.store_sku || "").trim();
+
+    if (site === "amazon" && asin) return `asin:${asin}`;
+    if (site === "target" && sku) return `tcin:${sku}`;
+    if (site === "walmart" && sku) return `wal:${sku}`;
+    if (site === "bestbuy" && sku) return `bby:${sku}`;
+
+    return "";
   }
 
   const PS = {
@@ -400,6 +435,14 @@
       store_sku: D.getStoreSKU ? D.getStoreSKU() : null,
     };
     await safeSet({ lastSnapshot: snap });
+
+    {
+      const a = sh.querySelector("#ps-footer-link");
+      if (a) {
+        const key = keyForCurrentPage(site, snap);
+        a.href = dashboardUrlForKey(key);
+      }
+    }
 
     const resultsEl = sh.querySelector("#ps-results");
     const statusEl =
@@ -514,18 +557,22 @@
 
       card.href = p.url || "#";
       card.target = "_blank";
+      const offerPillHTML = offerTagPill(p.offer_tag, isCurrentSite);
       card.innerHTML = `
         <div class="store-info">
           <img src="${ICON(storeLower)}" class="store-logo" />
           <div class="store-and-product">
-            <span class="store-name">${storeLabel(p.store)}</span>
+            <div class="store-line">
+              <span class="store-name">${escHtml(storeLabel(p.store))}</span>
+              ${offerPillHTML}
+            </div>
           </div>
         </div>
         <div class="price-info">
           <span class="price">$${(p.price_cents / 100).toFixed(2)}</span>
           ${tagsHTML}
         </div>
-      `;
+      `;  
       resultsEl.appendChild(card);
     });
 
