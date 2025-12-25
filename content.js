@@ -168,19 +168,27 @@
       getASIN() {
         return null;
       },
-      getStoreSKU() {
-        // 1) From URL
-        const m = location.pathname.match(/\/A-([0-9]{6,12})(?:$|[/?#])/i);
-        if (m) return m[1];
-        // 2) JSON blobs
-        const scripts = document.querySelectorAll("script");
-        for (const s of scripts) {
-          const txt = s.textContent || "";
-          const tcin = txt.match(/"tcin"\s*:\s*"([0-9]{6,12})"/i);
-          if (tcin) return tcin[1];
-        }
-        return null;
-      },
+  getStoreSKU() {
+    const href = String(location.href);
+
+    // 1) Most common Target PDP format: .../-/A-########
+    let m = href.match(/\/-\/A-(\d{8})(?:\b|\/|\?|#)/i);
+    if (m) return m[1];
+
+    // 1b) Sometimes present as a query param
+    const qp = new URL(href).searchParams.get("tcin");
+    if (qp && /^\d{8}$/.test(qp)) return qp;
+
+    // 2) JSON blobs (fallback)
+    const scripts = document.querySelectorAll("script");
+    for (const s of scripts) {
+      const txt = s.textContent || "";
+      const tcin = txt.match(/"tcin"\s*:\s*"(\d{8})"/i);
+      if (tcin) return tcin[1];
+    }
+
+    return null;
+  }
     },
 
     // ---------- Walmart ----------
