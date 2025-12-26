@@ -53,15 +53,7 @@
 
   const storeLabel = (s) => {
     const k = storeKey(s);
-    if (k === "bestbuy") return "Best Buy";
     return s || "Unknown";
-  };
-
-  const normalizeUPC = (raw) => {
-    let k = String(raw || "").replace(/[^0-9]/g, "");
-    if (k.length === 14 && k.startsWith("0")) k = k.slice(1);
-    if (k.length === 13 && k.startsWith("0")) k = k.slice(1);
-    return k;
   };
 
   // ---------- Amazon ----------
@@ -210,25 +202,31 @@
         return null;
       },
       getStoreSKU() {
-        // itemId from URL: /ip/.../<itemId>
-        const m = location.pathname.match(
-          /\/ip\/[^/]+\/([0-9]{6,20})(?:$|[/?#])/i
-        );
+        const path = String(location.pathname || "");
+
+        let m = path.match(/\/ip\/(?:[^/]+\/)?([0-9]{6,20})(?:$|[/?#])/i);
         if (m) return m[1];
-        // fallback from script JSON
+
+        // Fallback: sometimes itemId is in the query params
+        try {
+          const qp = new URL(location.href).searchParams.get("itemId");
+          if (qp && /^[0-9]{6,20}$/.test(qp)) return qp;
+        } catch {}
+
+        // Fallback from script JSON
         const scripts = document.querySelectorAll("script");
         for (const s of scripts) {
           const txt = s.textContent || "";
           const m2 = txt.match(/"itemId"\s*:\s*"([0-9]{6,20})"/i);
           if (m2) return m2[1];
         }
-        return null;
-      },
+    return null;
+  },
     },
 
     // ---------- BestBuy ----------
     bestbuy: {
-      store: "BestBuy",
+      store: "Best Buy",
       getTitle() {
         return clean(
           document.querySelector(".sku-title h1")?.innerText ||
@@ -286,16 +284,20 @@
   const HTML_URL = chrome.runtime.getURL("content.html");
   const CSS_URL = chrome.runtime.getURL("content.css");
   const ICONS = {
-    amazon: chrome.runtime.getURL("icons/amazon.png"),
-    target: chrome.runtime.getURL("icons/target-circle.png"),
-    walmart: chrome.runtime.getURL("icons/walmart.png"),
-    bestbuy: chrome.runtime.getURL("icons/bestbuy.png"),
-    apple: chrome.runtime.getURL("icons/apple.png"),
-    samsung: chrome.runtime.getURL("icons/samsung.png"),
-    lg: chrome.runtime.getURL("icons/lg.png"),
-    segway: chrome.runtime.getURL("icons/segway.png"),
+    amazon: chrome.runtime.getURL("icons/amazon.webp"),
+    target: chrome.runtime.getURL("icons/target-circle.webp"),
+    walmart: chrome.runtime.getURL("icons/walmart.webp"),
+    bestbuy: chrome.runtime.getURL("icons/bestbuy.webp"),
+    apple: chrome.runtime.getURL("icons/apple.webp"),
+    samsung: chrome.runtime.getURL("icons/samsung.webp"),
+    lg: chrome.runtime.getURL("icons/lg.webp"),
+    segway: chrome.runtime.getURL("icons/segway.webp"),
     default: chrome.runtime.getURL("icons/logo.png"),
-    dji: chrome.runtime.getURL("icons/dji.png"),
+    dji: chrome.runtime.getURL("icons/dji.webp"),
+    hiboy: chrome.runtime.getURL("icons/hiboy.webp"),
+    iscooter: chrome.runtime.getURL("icons/iscooter.webp"),
+    radicaladventures: chrome.runtime.getURL("icons/radicaladventures.webp"),
+    soloperformance: chrome.runtime.getURL("icons/sps.webp"),
   };
 
   const __cache = new Map();
@@ -332,47 +334,60 @@
   open: false,
   root: null,
   shadow: null,
+  populateTime: null,
 
   // New: tracking for auto refresh
   watchTimer: null,
   lastKey: null,
   isPopulating: false,
 
-  // Build a "key" for the current product and URL
   makeKey() {
     const site = siteOf();
     const D = DRIVERS[site] || DRIVERS.amazon;
     const asin = D.getASIN ? D.getASIN() : null;
-    const sku = D.getStoreSKU ? D.getStoreSKU() : null;
-    const title = D.getTitle ? D.getTitle() : null;
-    return [site, asin, sku, title, location.href].join("|");
+    const sku  = D.getStoreSKU ? D.getStoreSKU() : null;
+    return [site, asin, sku, location.href].join("|");
   },
 
-  // Start watching for product changes while sidebar is open
   startWatcher() {
     if (this.watchTimer) return;
+
+    // Initialize
     this.lastKey = this.makeKey();
-    this.watchTimer = setInterval(async () => {
+
+    this.watchTimer = setInterval(() => {
       if (!this.open) return;
+
       const keyNow = this.makeKey();
       if (keyNow === this.lastKey) return;
+
       this.lastKey = keyNow;
 
-      if (this.isPopulating) return;
-      try {
-        this.isPopulating = true;
-        await this.populate();
-      } finally {
-        this.isPopulating = false;
-      }
-    }, 1200); // about once per second
+      // Debounce: collapse rapid changes into one populate
+      if (this.populateTimer) clearTimeout(this.populateTimer);
+
+      this.populateTimer = setTimeout(async () => {
+        if (!this.open) return;
+        if (this.isPopulating) return;
+
+        try {
+          this.isPopulating = true;
+          await this.populate();
+        } finally {
+          this.isPopulating = false;
+        }
+      }, 350);
+    }, 600); // faster detection, but debounced so it won't spam
   },
 
-  // Stop watcher when sidebar is closed
   stopWatcher() {
     if (this.watchTimer) {
       clearInterval(this.watchTimer);
       this.watchTimer = null;
+    }
+    if (this.populateTimer) {
+      clearTimeout(this.populateTimer);
+      this.populateTimer = null;
     }
   },
 
@@ -445,15 +460,17 @@
     }
 
     const resultsEl = sh.querySelector("#ps-results");
-    const statusEl =
-      resultsEl.querySelector(".status") ||
-      (() => {
-        const el = document.createElement("div");
-        el.className = "status";
-        resultsEl.prepend(el);
-        return el;
-      })();
+    if (!resultsEl) {
+      console.warn("PriceCheck: #ps-results not found. Check content.html loaded and contains id='ps-results'.");
+      return;
+    }
+
+    resultsEl.innerHTML = "";
+
+    let statusEl = document.createElement("div");
+    statusEl.className = "status";
     statusEl.textContent = "Searching...";
+    resultsEl.appendChild(statusEl);
 
     const prodLabelEl = sh.querySelector(".asin-row strong");
     const prodValEl = sh.querySelector("#ps-asin-val");
@@ -472,7 +489,6 @@
     }
 
     let list = [];
-    let resolvedASIN = snap.asin;
 
     if (site === "amazon") {
       if (!snap.asin) {
@@ -493,7 +509,6 @@
         type: "RESOLVE_COMPARE_REQUEST",
         payload: { store: D.store, store_sku: snap.store_sku },
       });
-      resolvedASIN = resp?.asin || null;
       list = Array.isArray(resp?.results) ? resp.results.slice() : [];
     }
 
@@ -518,29 +533,26 @@
     // Only keep entries with real prices
     const priced = list.filter(p => Number.isFinite(p?.price_cents));
     if (!priced.length) {
-      statusEl.textContent = "No prices found.";
-      this.lastKey = this.makeKey();
-      return;
-    }
+    statusEl.textContent = list.length
+      ? "Matches found, but no stored prices yet."
+      : "No prices found.";
+    this.lastKey = this.makeKey();
+    return;
+  }
 
     // Sort cheapest → most expensive
     priced.sort((a, b) => a.price_cents - b.price_cents);
 
     const ICON = (k) => ICONS[k] || ICONS.default;
 
-    const currentStore = (D.store || "").toLowerCase();
-    const currentRow = priced.find(
-      r => (r.store || "").toLowerCase() === currentStore
-    );
-    const currentPrice = currentRow?.price_cents ?? null;
+    const currentStore = storeKey(D.store);
+    const currentRow = priced.find(r => storeKey(r.store) === currentStore);
 
     const cheapestPrice = priced[0].price_cents;
     const mostExpensivePrice = priced[priced.length - 1].price_cents;
 
-    resultsEl.innerHTML = "";
-
     priced.forEach(p => {
-      const storeLower = (p.store || "").toLowerCase();
+      const storeLower = storeKey(p.store);
       const isCurrentSite = storeLower === currentStore;
 
       let tagsHTML = "";

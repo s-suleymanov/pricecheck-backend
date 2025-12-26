@@ -30,7 +30,10 @@ function normUPC(val) {
   return k;
 }
 function normStore(s) {
-  return String(s || "").trim().toLowerCase();
+  return String(s || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, "");
 }
 function normSku(s) {
   return String(s || "").trim();
@@ -200,7 +203,7 @@ app.get("/v1/compare", async (req, res) => {
 // ---------- Compare by store + store_sku (GET) ----------
 // /v1/compare_by_store_sku?store=bestbuy&store_sku=...
 app.get("/v1/compare_by_store_sku", async (req, res) => {
-  const store = normStore(req.query.store);
+  const store = String(req.query.store || "").trim();
   const storeSku = normSku(req.query.store_sku);
 
   if (!store || !storeSku) {
@@ -339,7 +342,7 @@ app.post("/v1/observe", async (req, res) => {
     status,
   } = req.body || {};
 
-  const storeNorm = normStore(store);
+  const storeNorm = String(store || "").trim();
   const sku = normSku(store_sku);
   const cents = Number.isFinite(price_cents) ? price_cents : null;
   const upcNorm = upc ? normUPC(upc) : "";

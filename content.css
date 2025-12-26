@@ -69,7 +69,7 @@
 
 .content { padding: 16px; overflow-y: auto; flex-grow: 1; }
 #ps-results { display: flex; flex-direction: column; gap: 10px; }
-.status { color: #999; text-align: center; padding: 40px 0; font-size: 14px; }
+.status { color: #999; text-align: center; font-size: 14px; }
 
 .store-note {
   font-size: 12px;
