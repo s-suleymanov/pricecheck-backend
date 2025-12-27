@@ -1,5 +1,5 @@
 // background.js
-const API_BASES = ["https://pricecheck-extension.onrender.com"];
+const API_BASES = ["http://localhost:4000"];
 
 function siteOK(url = "") {
   return /(amazon|target|walmart|bestbuy)\./i.test(url);

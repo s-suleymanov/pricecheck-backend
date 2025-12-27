@@ -333,8 +333,11 @@
   width: 380,
   open: false,
   root: null,
+  populateTimer: null,
   shadow: null,
   populateTime: null,
+  populateSeq: 0, 
+  lastGood: new Map(), // key -> { at, results }
 
   // New: tracking for auto refresh
   watchTimer: null,
@@ -370,12 +373,7 @@
         if (!this.open) return;
         if (this.isPopulating) return;
 
-        try {
-          this.isPopulating = true;
-          await this.populate();
-        } finally {
-          this.isPopulating = false;
-        }
+        await this.populate();
       }, 350);
     }, 600); // faster detection, but debounced so it won't spam
   },
@@ -437,10 +435,35 @@
     return root;
   },
 
-  async populate() {
-    if (!this.shadow) return;
+async populate() {
+  if (!this.shadow) return;
+
+  // Prevent overlapping populates (variant switches can trigger rapid changes)
+  if (this.isPopulating) return;
+  this.isPopulating = true;
+
+  const seq = ++this.populateSeq;
+
+  try {
     const sh = this.shadow;
     const site = siteOf();
+
+    // Footer spacing: only when the page actually has horizontal overflow
+    {
+      const footer =
+        sh.querySelector("#ps-footer") ||
+        sh.querySelector(".footer") ||
+        sh.querySelector("#ps-footer-link")?.parentElement;
+
+      if (footer) {
+        const hasXOverflow =
+          Math.ceil(document.documentElement.scrollWidth) >
+          Math.ceil(document.documentElement.clientWidth);
+
+        footer.style.marginBottom = (site === "amazon" && hasXOverflow) ? "15px" : "";
+      }
+    }
+
     const D = DRIVERS[site] || DRIVERS.amazon;
 
     const snap = {
@@ -451,6 +474,7 @@
     };
     await safeSet({ lastSnapshot: snap });
 
+    // Footer dashboard link
     {
       const a = sh.querySelector("#ps-footer-link");
       if (a) {
@@ -461,84 +485,123 @@
 
     const resultsEl = sh.querySelector("#ps-results");
     if (!resultsEl) {
-      console.warn("PriceCheck: #ps-results not found. Check content.html loaded and contains id='ps-results'.");
+      console.warn(
+        "PriceCheck: #ps-results not found. Check content.html loaded and contains id='ps-results'."
+      );
       return;
     }
 
     resultsEl.innerHTML = "";
 
-    let statusEl = document.createElement("div");
+    const statusEl = document.createElement("div");
     statusEl.className = "status";
     statusEl.textContent = "Searching...";
     resultsEl.appendChild(statusEl);
 
-    const prodLabelEl = sh.querySelector(".asin-row strong");
-    const prodValEl = sh.querySelector("#ps-asin-val");
+    // Header product id line
+    {
+      const prodLabelEl = sh.querySelector(".asin-row strong");
+      const prodValEl = sh.querySelector("#ps-asin-val");
 
-    if (prodLabelEl && prodValEl) {
+      if (prodLabelEl && prodValEl) {
+        if (site === "amazon") {
+          prodLabelEl.textContent = "ASIN";
+          prodValEl.textContent = snap.asin || "Not found";
+        } else if (site === "target") {
+          prodLabelEl.textContent = "TCIN";
+          prodValEl.textContent = snap.store_sku || "Not found";
+        } else {
+          prodLabelEl.textContent = "SKU";
+          prodValEl.textContent = snap.store_sku || "Not found";
+        }
+      }
+    }
+
+    const keyNow = this.makeKey();
+
+    const callAPI = async () => {
       if (site === "amazon") {
-        prodLabelEl.textContent = "ASIN";
-        prodValEl.textContent = snap.asin || "Not found";
-      } else if (site === "target") {
-        prodLabelEl.textContent = "TCIN";
-        prodValEl.textContent = snap.store_sku || "Not found";
+        if (!snap.asin) return null;
+        return await safeSend({
+          type: "COMPARE_REQUEST",
+          payload: { asin: snap.asin },
+        });
       } else {
-        prodLabelEl.textContent = "SKU";
-        prodValEl.textContent = snap.store_sku || "Not found";
+        if (!snap.store_sku) return null;
+        return await safeSend({
+          type: "RESOLVE_COMPARE_REQUEST",
+          payload: { store: D.store, store_sku: snap.store_sku },
+        });
+      }
+    };
+
+    // ---- API call with retry + stale guard ----
+    let resp = await callAPI();
+
+    // If a newer populate started, do nothing (prevents stale overwrite)
+    if (seq !== this.populateSeq) return;
+
+    // Retry once on null/invalid response (service worker waking or transient hiccup)
+    if (!resp || !Array.isArray(resp.results)) {
+      await new Promise((r) => setTimeout(r, 250));
+      resp = await callAPI();
+      if (seq !== this.populateSeq) return;
+    }
+
+    // If still invalid, we will fall back to last-good cache (if any)
+    let list = Array.isArray(resp?.results) ? resp.results.slice() : null;
+
+    if (!list) {
+      const cached = this.lastGood.get(keyNow);
+      if (cached && (Date.now() - cached.at) < 60_000) {
+        list = cached.results.slice();
+      } else {
+        list = [];
       }
     }
 
-    let list = [];
-
-    if (site === "amazon") {
-      if (!snap.asin) {
-        statusEl.textContent = "ASIN not found.";
-        return;
-      }
-      const resp = await safeSend({
-        type: "COMPARE_REQUEST",
-        payload: { asin: snap.asin },
-      });
-      list = Array.isArray(resp?.results) ? resp.results.slice() : [];
-    } else {
-      if (!snap.store_sku) {
-        statusEl.textContent = "No product ID found.";
-        return;
-      }
-      const resp = await safeSend({
-        type: "RESOLVE_COMPARE_REQUEST",
-        payload: { store: D.store, store_sku: snap.store_sku },
-      });
-      list = Array.isArray(resp?.results) ? resp.results.slice() : [];
+    // Cache good results for this exact key to prevent "stuck empty" UI
+    if (list.length) {
+      this.lastGood.set(keyNow, { at: Date.now(), results: list.slice() });
     }
 
-    const bcEl = sh.querySelector("#ps-variant-val");
-    if (bcEl) {
-      let src = list.find((r) => (r.store || "").toLowerCase() === "amazon");
-      if (!src) src = list.find((r) => r.brand || r.category);
-      const brand = src?.brand || "";
-      const category = src?.category || "";
-      const bc = [brand, category].filter(Boolean).join(" ");
-      bcEl.textContent = bc || "N/A";
+    // Brand + category line
+    {
+      const bcEl = sh.querySelector("#ps-variant-val");
+      if (bcEl) {
+        let src = list.find((r) => (r.store || "").toLowerCase() === "amazon");
+        if (!src) src = list.find((r) => r.brand || r.category);
+        const brand = src?.brand || "";
+        const category = src?.category || "";
+        const bc = [brand, category].filter(Boolean).join(" ");
+        bcEl.textContent = bc || "N/A";
+      }
     }
 
     statusEl.textContent = "";
+
+    // If empty, show reason but do NOT let stale populates overwrite later
     if (!list.length) {
-      statusEl.textContent = "No prices found.";
-      // still update lastKey so watcher does not spam
+      if (site === "amazon" && !snap.asin) {
+        statusEl.textContent = "ASIN not found.";
+      } else if (site !== "amazon" && !snap.store_sku) {
+        statusEl.textContent = "No product ID found.";
+      } else {
+        statusEl.textContent = "No prices found.";
+      }
       this.lastKey = this.makeKey();
       return;
     }
 
     // Only keep entries with real prices
-    const priced = list.filter(p => Number.isFinite(p?.price_cents));
+    const priced = list.filter((p) => Number.isFinite(p?.price_cents));
     if (!priced.length) {
-    statusEl.textContent = list.length
-      ? "Matches found, but no stored prices yet."
-      : "No prices found.";
-    this.lastKey = this.makeKey();
-    return;
-  }
+      statusEl.textContent = list.length
+        ? "Matches found, but no stored prices yet."
+        : "No prices found.";
+      this.lastKey = this.makeKey();
+      return;
+    }
 
     // Sort cheapest → most expensive
     priced.sort((a, b) => a.price_cents - b.price_cents);
@@ -546,12 +609,13 @@
     const ICON = (k) => ICONS[k] || ICONS.default;
 
     const currentStore = storeKey(D.store);
-    const currentRow = priced.find(r => storeKey(r.store) === currentStore);
+    // (currentRow currently unused, but kept for future)
+    // const currentRow = priced.find((r) => storeKey(r.store) === currentStore);
 
     const cheapestPrice = priced[0].price_cents;
     const mostExpensivePrice = priced[priced.length - 1].price_cents;
 
-    priced.forEach(p => {
+    priced.forEach((p) => {
       const storeLower = storeKey(p.store);
       const isCurrentSite = storeLower === currentStore;
 
@@ -569,7 +633,9 @@
 
       card.href = p.url || "#";
       card.target = "_blank";
+
       const offerPillHTML = offerTagPill(p.offer_tag, isCurrentSite);
+
       card.innerHTML = `
         <div class="store-info">
           <img src="${ICON(storeLower)}" class="store-logo" />
@@ -584,14 +650,18 @@
           <span class="price">$${(p.price_cents / 100).toFixed(2)}</span>
           ${tagsHTML}
         </div>
-      `;  
+      `;
+
       resultsEl.appendChild(card);
     });
 
-
     // refresh the key after a successful populate
     this.lastKey = this.makeKey();
-  },
+  } finally {
+    // Only clear if we are still the latest populate attempt
+    if (seq === this.populateSeq) this.isPopulating = false;
+  }
+},
 
   async openSidebar() {
     await this.ensure();

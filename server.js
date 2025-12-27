@@ -52,6 +52,8 @@ app.get("/health", (_req, res) => res.json({ ok: true, version: "listings-only-1
 
 // ---------- Compare by ASIN / UPC / PCI (GET) ----------
 // /v1/compare?asin=B0.... OR /v1/compare?upc=... OR /v1/compare?pci=...
+// IMPORTANT: ASIN is input-only. We never match listings by ASIN except to resolve PCI/UPC.
+// All cross-store matching is PCI/UPC only.
 app.get("/v1/compare", async (req, res) => {
   const asin = toASIN(req.query.asin);
   const upcNorm = normUPC(req.query.upc);
@@ -60,8 +62,8 @@ app.get("/v1/compare", async (req, res) => {
   let upcKey = upcNorm || "";
   let pciKey = pci || "";
 
+  // If ASIN is provided, resolve PCI/UPC from the Amazon listing row
   if (asin && (!upcKey || !pciKey)) {
-    // Pull keys from the Amazon listing row if we can
     const r = await pool.query(
       `
       select upc, pci
@@ -80,20 +82,66 @@ app.get("/v1/compare", async (req, res) => {
     }
   }
 
+  // If user provided nothing, fail
   if (!asin && !upcNorm && !pci) {
     return res.status(400).json({ results: [], error: "need asin or upc or pci" });
   }
 
+  // If ASIN was provided but we could not resolve PCI/UPC,
+  // optionally return the Amazon listing row only (so Amazon pages still show something).
+  // If you prefer to return empty instead, remove this block.
+  if (asin && !upcKey && !pciKey) {
+    try {
+      const rOnly = await pool.query(
+        `
+        select
+          store, store_sku, upc, pci, offer_tag,
+          current_price_cents as price_cents,
+          current_price_observed_at as observed_at,
+          url, title
+        from public.listings
+        where lower(btrim(store)) = 'amazon'
+          and public.norm_sku(store_sku) = public.norm_sku($1)
+        order by current_price_observed_at desc nulls last, created_at desc
+        limit 1
+        `,
+        [asin]
+      );
+
+      const outOnly = rOnly.rows.map((r) => ({
+        store: r.store,
+        store_sku: r.store_sku || null,
+        asin: r.store_sku ? toASIN(r.store_sku) : null,
+        upc: r.upc || null,
+        pci: r.pci || null,
+        offer_tag: r.offer_tag || null,
+        price_cents: Number.isFinite(r.price_cents) ? r.price_cents : null,
+        seen_at: r.observed_at || null,
+        url: r.url || (r.store_sku ? `https://www.amazon.com/dp/${toASIN(r.store_sku)}` : null),
+        title: r.title || null,
+        brand: null,
+        category: null,
+        currency: "USD",
+        match_strength: 3,
+      }));
+
+      return res.json({ results: outOnly });
+    } catch (e) {
+      console.error("compare(asin-only) error:", e);
+      return res.status(500).json({ results: [] });
+    }
+  }
+
   try {
-    
+    // IMPORTANT: catalog meta is PCI/UPC only. No catalog.asin.
+    // IMPORTANT: listing match is PCI/UPC only. No ASIN matching.
     const sql = `
-        WITH anchor AS (
-          SELECT
-            (case when $3::text <> '' then upper(btrim($3::text)) else null end) as pci_key,
-            (case when $2::text <> '' then public.norm_upc($2::text) else null end) as upc_key,
-            (case when $1::text <> '' then upper(btrim($1::text)) else null end) as asin_key
-        ),
-              meta AS (
+      WITH anchor AS (
+        SELECT
+          (case when $2::text <> '' then upper(btrim($2::text)) else null end) as pci_key,
+          (case when $1::text <> '' then public.norm_upc($1::text) else null end) as upc_key
+      ),
+      meta AS (
         SELECT c.brand, c.category
         FROM public.catalog c
         CROSS JOIN anchor a
@@ -109,72 +157,57 @@ app.get("/v1/compare", async (req, res) => {
             AND c.upc IS NOT NULL AND btrim(c.upc) <> ''
             AND public.norm_upc(c.upc) = a.upc_key
           )
-          OR
-          (
-            a.asin_key IS NOT NULL
-            AND c.asin IS NOT NULL AND btrim(c.asin) <> ''
-            AND upper(btrim(c.asin)) = a.asin_key
-          )
         ORDER BY c.created_at DESC
         LIMIT 1
       ),
-        matched AS (
-          SELECT
-            l.store,
-            l.store_sku,
-            l.upc,
-            l.pci,
-            l.offer_tag,
-            l.current_price_cents AS price_cents,
-            l.current_price_observed_at AS observed_at,
-            l.url,
-            l.title,
-            m.brand,
-            m.category,
-            CASE
-              WHEN a.pci_key IS NOT NULL
+      matched AS (
+        SELECT
+          l.store,
+          l.store_sku,
+          l.upc,
+          l.pci,
+          l.offer_tag,
+          l.current_price_cents AS price_cents,
+          l.current_price_observed_at AS observed_at,
+          l.url,
+          l.title,
+          m.brand,
+          m.category,
+          CASE
+            WHEN a.pci_key IS NOT NULL
               AND l.pci IS NOT NULL AND btrim(l.pci) <> ''
-              AND upper(btrim(l.pci)) = a.pci_key THEN 3
-              WHEN a.upc_key IS NOT NULL
+              AND upper(btrim(l.pci)) = a.pci_key THEN 2
+            WHEN a.upc_key IS NOT NULL
               AND l.upc IS NOT NULL AND btrim(l.upc) <> ''
-              AND public.norm_upc(l.upc) = a.upc_key THEN 2
-              WHEN a.asin_key IS NOT NULL
-              AND lower(btrim(l.store)) = 'amazon'
-              AND public.norm_sku(l.store_sku) = public.norm_sku(a.asin_key) THEN 1
-              ELSE 0
-            END AS match_strength
-          FROM public.listings l
-          CROSS JOIN anchor a
-          LEFT JOIN meta m ON true
-          WHERE
-            (
-              a.pci_key IS NOT NULL
-              AND l.pci IS NOT NULL AND btrim(l.pci) <> ''
-              AND upper(btrim(l.pci)) = a.pci_key
-            )
-            OR
-            (
-              a.upc_key IS NOT NULL
-              AND l.upc IS NOT NULL AND btrim(l.upc) <> ''
-              AND public.norm_upc(l.upc) = a.upc_key
-            )
-            OR
-            (
-              a.asin_key IS NOT NULL
-              AND lower(btrim(l.store)) = 'amazon'
-              AND public.norm_sku(l.store_sku) = public.norm_sku(a.asin_key)
-            )
-        )
-        SELECT *
-        FROM matched
-        ORDER BY
-          match_strength DESC,
-          price_cents ASC NULLS LAST,
-          observed_at DESC NULLS LAST,
-          store ASC;
-      `;
+              AND public.norm_upc(l.upc) = a.upc_key THEN 1
+            ELSE 0
+          END AS match_strength
+        FROM public.listings l
+        CROSS JOIN anchor a
+        LEFT JOIN meta m ON true
+        WHERE
+          (
+            a.pci_key IS NOT NULL
+            AND l.pci IS NOT NULL AND btrim(l.pci) <> ''
+            AND upper(btrim(l.pci)) = a.pci_key
+          )
+          OR
+          (
+            a.upc_key IS NOT NULL
+            AND l.upc IS NOT NULL AND btrim(l.upc) <> ''
+            AND public.norm_upc(l.upc) = a.upc_key
+          )
+      )
+      SELECT *
+      FROM matched
+      ORDER BY
+        match_strength DESC,
+        price_cents ASC NULLS LAST,
+        observed_at DESC NULLS LAST,
+        store ASC;
+    `;
 
-    const { rows } = await pool.query(sql, [asin || "", upcKey || "", pciKey || ""]);
+    const { rows } = await pool.query(sql, [upcKey || "", pciKey || ""]);
 
     const out = rows.map((r) => ({
       store: r.store,
@@ -185,7 +218,9 @@ app.get("/v1/compare", async (req, res) => {
       offer_tag: r.offer_tag || null,
       price_cents: Number.isFinite(r.price_cents) ? r.price_cents : null,
       seen_at: r.observed_at || null,
-      url: r.url || (normStore(r.store) === "amazon" && r.store_sku ? `https://www.amazon.com/dp/${toASIN(r.store_sku)}` : null),
+      url:
+        r.url ||
+        (normStore(r.store) === "amazon" && r.store_sku ? `https://www.amazon.com/dp/${toASIN(r.store_sku)}` : null),
       title: r.title || null,
       brand: r.brand || null,
       category: r.category || null,
