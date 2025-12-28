@@ -298,6 +298,8 @@
     iscooter: chrome.runtime.getURL("icons/iscooter.webp"),
     radicaladventures: chrome.runtime.getURL("icons/radicaladventures.webp"),
     soloperformance: chrome.runtime.getURL("icons/sps.webp"),
+    alibaba: chrome.runtime.getURL("icons/alibaba.webp"),
+    temu: chrome.runtime.getURL("icons/temu.png"),
   };
 
   const __cache = new Map();
@@ -498,6 +500,11 @@ async populate() {
     statusEl.textContent = "Searching...";
     resultsEl.appendChild(statusEl);
 
+    {
+      const warnEl = sh.querySelector("#ps-warn");
+      if (warnEl) warnEl.hidden = true;
+    }
+
     // Header product id line
     {
       const prodLabelEl = sh.querySelector(".asin-row strong");
@@ -560,6 +567,14 @@ async populate() {
       }
     }
 
+    {
+      const warnEl = sh.querySelector("#ps-warn");
+      if (warnEl) {
+        const show = Array.isArray(list) && list.some((r) => r?.dropship_warning === true);
+        warnEl.hidden = !show;
+      }
+    }
+
     // Cache good results for this exact key to prevent "stuck empty" UI
     if (list.length) {
       this.lastGood.set(keyNow, { at: Date.now(), results: list.slice() });
@@ -599,6 +614,9 @@ async populate() {
       statusEl.textContent = list.length
         ? "Matches found, but no stored prices yet."
         : "No prices found.";
+
+      sh.querySelector("#ps-warn") && (sh.querySelector("#ps-warn").hidden = true);
+
       this.lastKey = this.makeKey();
       return;
     }

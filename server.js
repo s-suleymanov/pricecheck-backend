@@ -133,8 +133,6 @@ app.get("/v1/compare", async (req, res) => {
   }
 
   try {
-    // IMPORTANT: catalog meta is PCI/UPC only. No catalog.asin.
-    // IMPORTANT: listing match is PCI/UPC only. No ASIN matching.
     const sql = `
       WITH anchor AS (
         SELECT
@@ -142,7 +140,7 @@ app.get("/v1/compare", async (req, res) => {
           (case when $1::text <> '' then public.norm_upc($1::text) else null end) as upc_key
       ),
       meta AS (
-        SELECT c.brand, c.category
+        SELECT c.brand, c.category, COALESCE(c.dropship_warning, false) AS dropship_warning
         FROM public.catalog c
         CROSS JOIN anchor a
         WHERE
@@ -173,6 +171,7 @@ app.get("/v1/compare", async (req, res) => {
           l.title,
           m.brand,
           m.category,
+          m.dropship_warning AS dropship_warning,
           CASE
             WHEN a.pci_key IS NOT NULL
               AND l.pci IS NOT NULL AND btrim(l.pci) <> ''
@@ -224,6 +223,7 @@ app.get("/v1/compare", async (req, res) => {
       title: r.title || null,
       brand: r.brand || null,
       category: r.category || null,
+      dropship_warning: !!r.dropship_warning,
       currency: "USD",
       match_strength: r.match_strength ?? null,
     }));
@@ -274,7 +274,7 @@ app.get("/v1/compare_by_store_sku", async (req, res) => {
         (case when $1::text <> '' then public.norm_upc($1::text) else null end) as upc_key
     ),
     meta AS (
-      SELECT c.brand, c.category
+      SELECT c.brand, c.category, COALESCE(c.dropship_warning, false) AS dropship_warning
       FROM public.catalog c
       CROSS JOIN anchor a
       WHERE
@@ -296,6 +296,7 @@ app.get("/v1/compare_by_store_sku", async (req, res) => {
       l.title,
       m.brand,
       m.category,
+      m.dropship_warning AS dropship_warning,
       CASE
         -- 3 = exact listing you are currently on
         WHEN lower(btrim(l.store)) = a.anchor_store
@@ -347,6 +348,7 @@ app.get("/v1/compare_by_store_sku", async (req, res) => {
       title: r.title || null,
       brand: r.brand || null,
       category: r.category || null,
+      dropship_warning: r.dropship_warning === true,
       currency: "USD",
       match_strength: r.match_strength ?? null,
     }));
