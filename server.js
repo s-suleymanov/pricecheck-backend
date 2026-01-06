@@ -69,11 +69,11 @@ function normStore(s) {
 }
 function storeDisplay(s) {
   const k = normStore(s);
-  if (k === "amazon") return "Amazon";
-  if (k === "target") return "Target";
-  if (k === "walmart") return "Walmart";
-  if (k === "bestbuy" || k === "bestbuycom" || k === "bestbuyinc") return "Best Buy";
-  return s ? String(s).trim() : "";
+  if (k === "bestbuy" || k === "bestbuycom" || k === "bestbuyinc") return "bestbuy";
+  if (k === "amazon") return "amazon";
+  if (k === "target") return "target";
+  if (k === "walmart") return "walmart";
+  return k || "";
 }
 function normSku(s) {
   return String(s || "").trim();
