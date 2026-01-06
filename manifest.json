@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "PriceCheck: Your All-in-One Shopping Assistant",
-  "version": "0.8.8",
+  "version": "0.9.0",
   "description": "PriceCheck instantly compares prices across stores to help you find the best deal.",
   "action": {"default_title":"Toggle PriceCheck"},
   "permissions": ["scripting", "storage"],
@@ -24,11 +24,7 @@
     {
       "resources": ["content.html", "content.css", "icons/*"],
       "matches": [
-        "https://*.amazon.com/*",
-        "https://*.target.com/*",
-        "https://*.walmart.com/*",
-        "https://*.bestbuy.com/*",
-        "https://*.apple.com/*"
+        "<all_urls>"
       ]
     }
   ]

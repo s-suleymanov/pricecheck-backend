@@ -191,6 +191,25 @@
   transform: translateY(-1px);
 }
 
+/* Recall alert (red) */
+.pc-warn--recall{
+  background: #fff1f1;
+  border: 1px solid #ffc7c7;
+}
+
+.pc-warn--recall .pc-warn__icon{
+  color: #8a1f1f;
+  background: rgba(255, 59, 48, 0.14);
+}
+
+.pc-warn--recall .pc-warn__title{
+  color: #5d0f0f;
+}
+
+.pc-warn--recall .pc-warn__text{
+  color: #6d1a1a;
+}
+
 .footer-cta:active{
   transform: translateY(0px);
   box-shadow: 0 2px 10px rgba(0,0,0,0.08);

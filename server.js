@@ -10,7 +10,7 @@ app.use((req, res, next) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Vary", "Origin");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Accept");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Accept, X-PC-Client");
   if (req.method === "OPTIONS") return res.sendStatus(200);
   next();
 });
@@ -20,6 +20,38 @@ const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: process.env.PGSSLMODE === "disable" ? false : { rejectUnauthorized: false },
 });
+
+const ALLOWED_STORES = new Set(["amazon", "target", "walmart", "bestbuy", "bestbuycom", "bestbuyinc"]);
+function storeOk(s) {
+  const k = normStore(s);
+  if (k === "bestbuy") return true;
+  if (k === "bestbuycom") return true;
+  if (k === "bestbuyinc") return true;
+  return ALLOWED_STORES.has(k);
+}
+
+// simple in-memory rate limiter per key
+const RL = new Map(); // key -> { count, resetAt }
+function rateLimitKey(req) {
+  const ip = req.headers["x-forwarded-for"]?.split(",")[0]?.trim() || req.socket.remoteAddress || "unknown";
+  const client = String(req.headers["x-pc-client"] || "").slice(0, 80);
+  return client ? `c:${client}` : `ip:${ip}`;
+}
+
+function allowRate(req, limit = 120, windowMs = 10 * 60 * 1000) {
+  const key = rateLimitKey(req);
+  const now = Date.now();
+  const cur = RL.get(key);
+
+  if (!cur || now > cur.resetAt) {
+    RL.set(key, { count: 1, resetAt: now + windowMs });
+    return true;
+  }
+
+  cur.count += 1;
+  RL.set(key, cur);
+  return cur.count <= limit;
+}
 
 // ---------- Normalizers ----------
 function normUPC(val) {
@@ -34,6 +66,14 @@ function normStore(s) {
     .trim()
     .toLowerCase()
     .replace(/[^a-z0-9]/g, "");
+}
+function storeDisplay(s) {
+  const k = normStore(s);
+  if (k === "amazon") return "Amazon";
+  if (k === "target") return "Target";
+  if (k === "walmart") return "Walmart";
+  if (k === "bestbuy" || k === "bestbuycom" || k === "bestbuyinc") return "Best Buy";
+  return s ? String(s).trim() : "";
 }
 function normSku(s) {
   return String(s || "").trim();
@@ -109,7 +149,7 @@ app.get("/v1/compare", async (req, res) => {
       );
 
       const outOnly = rOnly.rows.map((r) => ({
-        store: r.store,
+        store: storeDisplay(r.store),
         store_sku: r.store_sku || null,
         asin: r.store_sku ? toASIN(r.store_sku) : null,
         upc: r.upc || null,
@@ -140,7 +180,7 @@ app.get("/v1/compare", async (req, res) => {
           (case when $1::text <> '' then public.norm_upc($1::text) else null end) as upc_key
       ),
       meta AS (
-        SELECT c.brand, c.category, COALESCE(c.dropship_warning, false) AS dropship_warning
+        SELECT c.brand, c.category, COALESCE(c.dropship_warning, false) AS dropship_warning, c.recall_url AS recall_url
         FROM public.catalog c
         CROSS JOIN anchor a
         WHERE
@@ -172,6 +212,7 @@ app.get("/v1/compare", async (req, res) => {
           m.brand,
           m.category,
           m.dropship_warning AS dropship_warning,
+          m.recall_url AS recall_url,
           CASE
             WHEN a.pci_key IS NOT NULL
               AND l.pci IS NOT NULL AND btrim(l.pci) <> ''
@@ -209,7 +250,7 @@ app.get("/v1/compare", async (req, res) => {
     const { rows } = await pool.query(sql, [upcKey || "", pciKey || ""]);
 
     const out = rows.map((r) => ({
-      store: r.store,
+      store: storeDisplay(r.store),
       store_sku: r.store_sku || null,
       asin: normStore(r.store) === "amazon" ? (r.store_sku ? toASIN(r.store_sku) : null) : null,
       upc: r.upc || null,
@@ -224,6 +265,7 @@ app.get("/v1/compare", async (req, res) => {
       brand: r.brand || null,
       category: r.category || null,
       dropship_warning: !!r.dropship_warning,
+      recall_url: r.recall_url || null,
       currency: "USD",
       match_strength: r.match_strength ?? null,
     }));
@@ -235,10 +277,8 @@ app.get("/v1/compare", async (req, res) => {
   }
 });
 
-// ---------- Compare by store + store_sku (GET) ----------
-// /v1/compare_by_store_sku?store=bestbuy&store_sku=...
 app.get("/v1/compare_by_store_sku", async (req, res) => {
-  const store = String(req.query.store || "").trim();
+  const store = normStore(req.query.store);
   const storeSku = normSku(req.query.store_sku);
 
   if (!store || !storeSku) {
@@ -246,12 +286,11 @@ app.get("/v1/compare_by_store_sku", async (req, res) => {
   }
 
   try {
-    // Step 1: find an anchor listing row (get pci/upc and maybe amazon asin)
     const r1 = await pool.query(
       `
       SELECT store, store_sku, upc, pci
       FROM public.listings
-      WHERE lower(btrim(store)) = lower(btrim($1))
+      WHERE lower(regexp_replace(btrim(store), '[^a-z0-9]', '', 'g')) = $1
         AND public.norm_sku(store_sku) = public.norm_sku($2)
       ORDER BY current_price_observed_at DESC NULLS LAST, created_at DESC
       LIMIT 1
@@ -265,78 +304,70 @@ app.get("/v1/compare_by_store_sku", async (req, res) => {
     const pci = r1.rows[0]?.pci ? normPci(r1.rows[0].pci) : "";
 
     const r2 = await pool.query(
-  `
-    WITH anchor AS (
+      `
+      WITH anchor AS (
+        SELECT
+          $3::text as anchor_store,              -- already normalized
+          public.norm_sku($4::text) as anchor_sku,
+          (case when $2::text <> '' then upper(btrim($2::text)) else null end) as pci_key,
+          (case when $1::text <> '' then public.norm_upc($1::text) else null end) as upc_key
+      ),
+      meta AS (
+        SELECT c.brand, c.category, COALESCE(c.dropship_warning, false) AS dropship_warning, c.recall_url AS recall_url
+        FROM public.catalog c
+        CROSS JOIN anchor a
+        WHERE
+          (a.pci_key IS NOT NULL AND c.pci IS NOT NULL AND btrim(c.pci) <> '' AND upper(btrim(c.pci)) = a.pci_key)
+          OR
+          (a.upc_key IS NOT NULL AND c.upc IS NOT NULL AND btrim(c.upc) <> '' AND public.norm_upc(c.upc) = a.upc_key)
+        ORDER BY c.created_at DESC
+        LIMIT 1
+      )
       SELECT
-        lower(btrim($3::text)) as anchor_store,
-        public.norm_sku($4::text) as anchor_sku,
-        (case when $2::text <> '' then upper(btrim($2::text)) else null end) as pci_key,
-        (case when $1::text <> '' then public.norm_upc($1::text) else null end) as upc_key
-    ),
-    meta AS (
-      SELECT c.brand, c.category, COALESCE(c.dropship_warning, false) AS dropship_warning
-      FROM public.catalog c
+        l.store,
+        l.store_sku,
+        l.upc,
+        l.pci,
+        l.offer_tag,
+        l.current_price_cents AS price_cents,
+        l.current_price_observed_at AS observed_at,
+        l.url,
+        l.title,
+        m.brand,
+        m.category,
+        m.dropship_warning AS dropship_warning,
+        m.recall_url AS recall_url,
+        CASE
+          WHEN lower(regexp_replace(btrim(l.store), '[^a-z0-9]', '', 'g')) = a.anchor_store
+           AND public.norm_sku(l.store_sku) = a.anchor_sku THEN 3
+          WHEN a.pci_key IS NOT NULL
+           AND l.pci IS NOT NULL AND btrim(l.pci) <> ''
+           AND upper(btrim(l.pci)) = a.pci_key THEN 2
+          WHEN a.upc_key IS NOT NULL
+           AND l.upc IS NOT NULL AND btrim(l.upc) <> ''
+           AND public.norm_upc(l.upc) = a.upc_key THEN 1
+          ELSE 0
+        END AS match_strength
+      FROM public.listings l
       CROSS JOIN anchor a
+      LEFT JOIN meta m ON true
       WHERE
-        (a.pci_key IS NOT NULL AND c.pci IS NOT NULL AND btrim(c.pci) <> '' AND upper(btrim(c.pci)) = a.pci_key)
+        (lower(regexp_replace(btrim(l.store), '[^a-z0-9]', '', 'g')) = a.anchor_store AND public.norm_sku(l.store_sku) = a.anchor_sku)
         OR
-        (a.upc_key IS NOT NULL AND c.upc IS NOT NULL AND btrim(c.upc) <> '' AND public.norm_upc(c.upc) = a.upc_key)
-      ORDER BY c.created_at DESC
-      LIMIT 1
-    )
-    SELECT
-      l.store,
-      l.store_sku,
-      l.upc,
-      l.pci,
-      l.offer_tag,
-      l.current_price_cents AS price_cents,
-      l.current_price_observed_at AS observed_at,
-      l.url,
-      l.title,
-      m.brand,
-      m.category,
-      m.dropship_warning AS dropship_warning,
-      CASE
-        -- 3 = exact listing you are currently on
-        WHEN lower(btrim(l.store)) = a.anchor_store
-        AND public.norm_sku(l.store_sku) = a.anchor_sku THEN 3
-
-        -- 2 = pci match
-        WHEN a.pci_key IS NOT NULL
-        AND l.pci IS NOT NULL AND btrim(l.pci) <> ''
-        AND upper(btrim(l.pci)) = a.pci_key THEN 2
-
-        -- 1 = upc match
-        WHEN a.upc_key IS NOT NULL
-        AND l.upc IS NOT NULL AND btrim(l.upc) <> ''
-        AND public.norm_upc(l.upc) = a.upc_key THEN 1
-
-        ELSE 0
-      END AS match_strength
-    FROM public.listings l
-    CROSS JOIN anchor a
-    LEFT JOIN meta m ON true
-    WHERE
-      -- always include the exact listing
-      (lower(btrim(l.store)) = a.anchor_store AND public.norm_sku(l.store_sku) = a.anchor_sku)
-      OR
-      -- plus matches by pci/upc
-      (a.pci_key IS NOT NULL AND l.pci IS NOT NULL AND btrim(l.pci) <> '' AND upper(btrim(l.pci)) = a.pci_key)
-      OR
-      (a.upc_key IS NOT NULL AND l.upc IS NOT NULL AND btrim(l.upc) <> '' AND public.norm_upc(l.upc) = a.upc_key)
-    ORDER BY
-      match_strength DESC,
-      price_cents ASC NULLS LAST,
-      observed_at DESC NULLS LAST,
-      store ASC;
-    `,
-    [upc || "", pci || "", store, storeSku]
-  );
-
+        (a.pci_key IS NOT NULL AND l.pci IS NOT NULL AND btrim(l.pci) <> '' AND upper(btrim(l.pci)) = a.pci_key)
+        OR
+        (a.upc_key IS NOT NULL AND l.upc IS NOT NULL AND btrim(l.upc) <> '' AND public.norm_upc(l.upc) = a.upc_key)
+      ORDER BY
+        match_strength DESC,
+        price_cents ASC NULLS LAST,
+        observed_at DESC NULLS LAST,
+        l.store ASC;
+      `,
+      [upc || "", pci || "", store, storeSku]
+    );
 
     const out = r2.rows.map((r) => ({
-      store: r.store,
+      store: storeDisplay(r.store),
       store_sku: r.store_sku || null,
       asin: normStore(r.store) === "amazon" ? (r.store_sku ? toASIN(r.store_sku) : null) : null,
       upc: r.upc || null,
@@ -349,110 +380,60 @@ app.get("/v1/compare_by_store_sku", async (req, res) => {
       brand: r.brand || null,
       category: r.category || null,
       dropship_warning: r.dropship_warning === true,
+      recall_url: r.recall_url || null,
       currency: "USD",
       match_strength: r.match_strength ?? null,
     }));
 
-    res.json({ results: out, anchor: { store, store_sku: storeSku, upc: upc || null, pci: pci || null } });
+    return res.json({
+      results: out,
+      anchor: { store: storeDisplay(store), store_sku: storeSku, upc: upc || null, pci: pci || null },
+    });
   } catch (e) {
     console.error("compare_by_store_sku error:", e);
-    res.status(500).json({ results: [] });
+    return res.status(500).json({ results: [] });
   }
 });
 
-// ---------- Observe (POST) ----------
-// This writes/updates listings (unique store+store_sku) and appends price_history.
-// Body should include: store, store_sku, price_cents, and optionally upc/pci/url/title/brand/category/offer_tag/observed_at
-app.post("/v1/observe", async (req, res) => {
-  const {
-    store,
-    store_sku,
-    price_cents,
-    upc,
-    pci,
-    url,
-    title,
-    brand,
-    category,
-    offer_tag,
-    observed_at,
-    status,
-  } = req.body || {};
-
-  const storeNorm = String(store || "").trim();
-  const sku = normSku(store_sku);
-  const cents = Number.isFinite(price_cents) ? price_cents : null;
-  const upcNorm = upc ? normUPC(upc) : "";
-  const pciNorm = pci ? normPci(pci) : "";
-
-  if (!storeNorm || !sku || cents == null) {
-    return res.status(400).json({ ok: false, error: "store, store_sku, price_cents required" });
-  }
-
-  const client = await pool.connect();
+app.post("/v1/observe", async (req, res) => { 
   try {
-    await client.query("BEGIN");
+    const p = req.body || {};
+    const observedAt = p.observed_at ? new Date(p.observed_at) : new Date();
+    const store = normStore(p.store);
+    const storeSku = String(p.store_sku || "").trim();
+    const priceCents = Number(p.price_cents);
 
-    // listings upsert (unique is store+store_sku)
-    await client.query(
+    if (!store || !storeSku || !Number.isFinite(priceCents)) {
+      return res.status(400).json({ ok: false, error: "missing store/store_sku/price_cents" });
+    }
+
+    // A) Insert history (dedupe allowed if you have a constraint)
+    await pool.query(
       `
-      INSERT INTO public.listings (
-        store, store_sku, upc, pci, url, title, brand, category,
-        offer_tag, status,
-        current_price_cents, current_price_observed_at, created_at
-      )
-      VALUES (
-        $1, $2, nullif($3,''), nullif($4,''),
-        nullif($5,''), nullif($6,''), nullif($7,''), nullif($8,''),
-        nullif($9,''), COALESCE(nullif($10,''), 'active'),
-        $11, COALESCE($12::timestamptz, now()), now()
-      )
-      ON CONFLICT (store, store_sku)
-      DO UPDATE SET
-        upc = COALESCE(nullif(EXCLUDED.upc,''), listings.upc),
-        pci = COALESCE(nullif(EXCLUDED.pci,''), listings.pci),
-        url = COALESCE(nullif(EXCLUDED.url,''), listings.url),
-        title = COALESCE(nullif(EXCLUDED.title,''), listings.title),
-        brand = COALESCE(nullif(EXCLUDED.brand,''), listings.brand),
-        category = COALESCE(nullif(EXCLUDED.category,''), listings.category),
-        offer_tag = COALESCE(nullif(EXCLUDED.offer_tag,''), listings.offer_tag),
-        status = COALESCE(nullif(EXCLUDED.status,''), listings.status),
-        current_price_cents = EXCLUDED.current_price_cents,
-        current_price_observed_at = EXCLUDED.current_price_observed_at;
+      INSERT INTO public.price_history (store, store_sku, price_cents, observed_at)
+      VALUES ($1, $2, $3, $4)
+      ON CONFLICT DO NOTHING
       `,
-      [
-        storeNorm,
-        sku,
-        upcNorm,
-        pciNorm,
-        url || "",
-        title || "",
-        brand || "",
-        category || "",
-        offer_tag || "",
-        status || "active",
-        cents,
-        observed_at || null,
-      ]
+      [store, storeSku, priceCents, observedAt]
     );
 
-    // price_history append (optional but recommended)
-    await client.query(
+    // B) Update listings current price (only the 2 fields)
+    const up = await pool.query(
       `
-      INSERT INTO public.price_history (store, store_sku, upc, pci, price_cents, observed_at, url, title)
-      VALUES ($1, $2, nullif($3,''), nullif($4,''), $5, COALESCE($6::timestamptz, now()), nullif($7,''), nullif($8,''))
+      UPDATE public.listings
+         SET current_price_cents = $1,
+             current_price_observed_at = $2
+       WHERE lower(btrim(store)) = lower(btrim($3))
+         AND norm_sku(store_sku) = norm_sku($4)
+         AND (current_price_observed_at IS NULL OR $2 >= current_price_observed_at)
       `,
-      [storeNorm, sku, upcNorm, pciNorm, cents, observed_at || null, url || "", title || ""]
+      [priceCents, observedAt, store, storeSku]
     );
 
-    await client.query("COMMIT");
-    res.json({ ok: true });
+    return res.json({ ok: true, listingUpdated: up.rowCount > 0 });
   } catch (e) {
-    await client.query("ROLLBACK");
     console.error("observe error:", e);
-    res.status(400).json({ ok: false, error: e.message });
-  } finally {
-    client.release();
+    return res.status(500).json({ ok: false });
   }
 });
 

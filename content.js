@@ -51,43 +51,160 @@
 
   const storeKey = (s) => String(s || "").toLowerCase().replace(/[^a-z0-9]/g, "");
 
-  const storeLabel = (s) => {
-    const k = storeKey(s);
-    return s || "Unknown";
+  const STORE_LABELS = {
+    amazon: "Amazon",
+    target: "Target",
+    walmart: "Walmart",
+    bestbuy: "Best Buy",
+    bby: "Best Buy",
+
+    soloperformance: "Solo Performance",
+    radicaladventures: "Radical Adventures",
+    brandsmart: "BrandsMart",
+    aliexpress: "AliExpress",
+    electricsport: "Electric Sport",
+    electricride: "Electric Ride",
+
+    apple: "Apple",
+    dji: "DJI",
+    segway: "Segway",
+    iscooter: "iScooter",
+
+    lg: "LG",
+    sony: "Sony",
+    asus: "ASUS",
+    hp: "HP",
+    dell: "Dell",
+    bose: "Bose",
   };
 
-  // ---------- Amazon ----------
-  function getAmazonPriceCents() {
-    const pref = document.querySelector(".priceToPay .a-offscreen");
-    if (pref?.innerText) {
-      const v = toCents(pref.innerText);
-      if (Number.isFinite(v)) return v;
-    }
-    const nodes = document.querySelectorAll(
-      ".a-price .a-offscreen, [data-a-color='price'] .a-offscreen, #corePrice_feature_div .a-offscreen"
-    );
-    for (const el of nodes) {
-      const text = el?.innerText;
-      if (!text) continue;
-      let bad = false;
-      let p = el;
-      for (let i = 0; i < 4 && p; i++) {
-        if (
-          p.classList?.contains("a-text-price") ||
-          p.classList?.contains("basisPrice") ||
-          p.getAttribute?.("data-a-strike") === "true"
-        ) {
-          bad = true;
-          break;
-        }
-        p = p.parentElement;
-      }
-      if (bad) continue;
-      const v = toCents(text);
-      if (Number.isFinite(v)) return v;
-    }
-    return null;
+  const storeLabel = (s) => {
+  const k = storeKey(s);
+
+  // normalize a couple common inputs
+  if (k === "bestbuycom" || k === "bestbuyinc") return "Best Buy";
+
+  // mapping wins
+  if (STORE_LABELS[k]) return STORE_LABELS[k];
+
+  // fallback: reasonable title-case
+  const raw = String(s || "").trim();
+  if (!raw) return "Unknown";
+  return raw
+    .toLowerCase()
+    .replace(/\b[a-z]/g, (c) => c.toUpperCase());
+};
+
+function getAmazonPriceCents() {
+  const toCents = (s) => {
+    const n = parseFloat(String(s || "").replace(/[^0-9.]/g, ""));
+    return Number.isFinite(n) ? Math.round(n * 100) : null;
+  };
+
+  // 1) Most reliable on many PDPs (your example)
+  // <input type="hidden" id="attach-base-product-price" value="159.98" />
+  {
+    const v = document.querySelector("#attach-base-product-price")?.getAttribute("value");
+    const c = toCents(v);
+    if (Number.isFinite(c) && c > 0) return c;
   }
+
+  // 2) Limit search to the main price boxes (avoid ads/other modules)
+  const root =
+    document.querySelector("#corePriceDisplay_desktop_feature_div") ||
+    document.querySelector("#corePriceDisplay_mobile_feature_div") ||
+    document.querySelector("#apex_desktop") ||
+    document.querySelector("#apex_mobile") ||
+    document.querySelector("#ppd") ||
+    document.querySelector("#centerCol") ||
+    document.body;
+
+  const badText = (t) => {
+    const x = String(t || "").toLowerCase();
+    return (
+      x.includes("list price") ||
+      x.includes("typical price") ||
+      x.includes("was:") ||
+      x.includes("msrp") ||
+      x.includes("reference price") ||
+      x.includes("with trade-in") ||
+      x.includes("/month") ||
+      x.includes("/mo") ||
+      x.includes("/week") ||
+      x.includes("2 weeks") ||
+      x.includes("per month") ||
+      x.includes("installment") ||
+      x.includes("installments") ||
+      x.includes("affirm") ||
+      x.includes("klarna") ||
+      x.includes("or $") // "Or $40.00/2 weeks"
+    );
+  };
+
+  const isBadContext = (el) => {
+    if (!el) return true;
+
+    // Strike/list price wrapper often used for crossed-out prices
+    if (el.closest(".a-text-price")) return true;
+
+    // Financing widgets often live in their own blocks
+    const ctxEl = el.closest("section,div,li,span") || el.parentElement || root;
+    const ctx = ctxEl ? (ctxEl.innerText || ctxEl.textContent || "") : "";
+    return badText(ctx);
+  };
+
+  const candidates = [];
+
+  // 3) Prefer "price to pay" and core current price blocks first
+  const preferredRoots = [
+    root.querySelector("#priceToPay") || root.querySelector('[data-testid="priceToPay"]'),
+    root.querySelector("#corePrice_feature_div"),
+    root.querySelector("#corePriceDisplay_desktop_feature_div"),
+    root.querySelector("#corePriceDisplay_mobile_feature_div"),
+    root,
+  ].filter(Boolean);
+
+  // 3a) Offscreen price spans (usually the real current price)
+  for (const r of preferredRoots) {
+    const nodes = r.querySelectorAll(".a-price .a-offscreen, span.a-price.a-text-price span.a-offscreen");
+    for (const el of nodes) {
+      const raw = (el.textContent || "").trim();
+      if (!raw) continue;
+
+      // Must look like a price and not be in financing/list context
+      if (!raw.includes("$")) continue;
+      if (isBadContext(el)) continue;
+
+      const cents = toCents(raw);
+      if (Number.isFinite(cents) && cents > 0) candidates.push(cents);
+    }
+    if (candidates.length) break; // stop early if we already got good candidates from preferred areas
+  }
+
+  // 3b) If offscreen is missing, reconstruct from whole + fraction in the core price area
+  if (!candidates.length) {
+    for (const r of preferredRoots) {
+      const whole = r.querySelector(".a-price-whole");
+      const frac = r.querySelector(".a-price-fraction");
+      if (whole && !isBadContext(whole)) {
+        const w = (whole.textContent || "").replace(/[^\d]/g, "");
+        const f = (frac?.textContent || "").replace(/[^\d]/g, "");
+        if (w) {
+          const s = f ? `${w}.${f.padEnd(2, "0").slice(0, 2)}` : w;
+          const cents = toCents(s);
+          if (Number.isFinite(cents) && cents > 0) return cents;
+        }
+      }
+    }
+  }
+
+  if (candidates.length) {
+    // If both current and other prices leak in, current is almost always the smallest real price candidate
+    return Math.min(...candidates);
+  }
+
+  return null;
+}
 
   // ---------- DRIVERS ----------
   const DRIVERS = {
@@ -235,11 +352,44 @@
         );
       },
       getPriceCents() {
-        const el =
-          document.querySelector(
-            ".priceView-hero-price span[aria-hidden='true']"
-          ) || document.querySelector(".priceView-customer-price span");
-        return toCents(el?.innerText || "");
+        // 1) meta tags (very reliable when present)
+        {
+          const m =
+            document.querySelector('meta[property="product:price:amount"]')?.content ||
+            document.querySelector('meta[itemprop="price"]')?.content;
+          const c = toCents(m);
+          if (Number.isFinite(c) && c > 0) return c;
+        }
+
+        // 2) visible hero price (your current approach)
+        {
+          const el =
+            document.querySelector(".priceView-hero-price span[aria-hidden='true']") ||
+            document.querySelector(".priceView-customer-price span") ||
+            document.querySelector('[data-testid="customer-price"] span') ||
+            document.querySelector('[data-testid="customer-price"]');
+          const c = toCents(el?.textContent || "");
+          if (Number.isFinite(c) && c > 0) return c;
+        }
+
+        // 3) last resort: search inside the main pricing area only
+        {
+          const root =
+            document.querySelector('[data-testid="pricing-price"]') ||
+            document.querySelector(".priceView-layout") ||
+            document.querySelector("#pricing-price") ||
+            document.querySelector("main") ||
+            document.body;
+
+          const nodes = root.querySelectorAll("span");
+          for (const n of nodes) {
+            const t = (n.textContent || "").trim();
+            if (!t.includes("$")) continue;
+            const c = toCents(t);
+            if (Number.isFinite(c) && c > 0) return c;
+          }
+        }
+        return null;
       },
       getASIN() {
         return null;
@@ -271,6 +421,27 @@
       .replaceAll(">", "&gt;")
       .replaceAll('"', "&quot;")
       .replaceAll("'", "&#39;");
+    }
+
+    function nonEmpty(s) {
+    return !!String(s || "").trim();
+  }
+
+  function setRecallAlert(sh, recallUrl) {
+    const el = sh?.querySelector?.("#ps-recall");
+    if (!el) return;
+
+    const hasRecall = !!String(recallUrl || "").trim();
+    el.hidden = !hasRecall;
+
+    if (hasRecall) {
+      el.style.cursor = "pointer";
+      el.onclick = () =>
+        window.open(String(recallUrl).trim(), "_blank", "noopener,noreferrer");
+    } else {
+      el.style.cursor = "";
+      el.onclick = null;
+    }
   }
 
   function offerTagPill(offer_tag, isCurrent = false) {
@@ -345,6 +516,40 @@
   watchTimer: null,
   lastKey: null,
   isPopulating: false,
+  observeMem: new Map(), // key -> { at, price_cents }
+  observeWindow: [],     // timestamps for simple rate limit
+
+  observeKey(site, snap) {
+    const store = (DRIVERS[site]?.store || "").trim();
+    const sku = site === "amazon"
+      ? String(snap?.asin || "").trim().toUpperCase()
+      : String(snap?.store_sku || "").trim();
+    if (!store || !sku) return "";
+    return `${store}::${sku}`;
+  },
+
+  observeAllowed(key, price_cents) {
+    const now = Date.now();
+
+    // basic per-install rate limit: max 30 observes per 10 minutes
+    const windowMs = 10 * 60 * 1000;
+    this.observeWindow = this.observeWindow.filter((t) => now - t < windowMs);
+    if (this.observeWindow.length >= 30) return false;
+
+    const prev = this.observeMem.get(key);
+    const thirtyMin = 30 * 60 * 1000;
+    if (prev && prev.price_cents === price_cents && (now - prev.at) < thirtyMin) {
+      return false;
+    }
+
+    return true;
+  },
+
+  observeRemember(key, price_cents) {
+    const now = Date.now();
+    this.observeWindow.push(now);
+    this.observeMem.set(key, { at: now, price_cents });
+  },
 
   makeKey() {
     const site = siteOf();
@@ -474,6 +679,37 @@ async populate() {
       price_cents: D.getPriceCents ? D.getPriceCents() : null,
       store_sku: D.getStoreSKU ? D.getStoreSKU() : null,
     };
+
+    {
+      const price = snap.price_cents;
+      const key = this.observeKey(site, snap);
+
+      // For Amazon, store_sku in DB is the ASIN (per your listings-first setup)
+      const storeSkuForObserve = site === "amazon"
+        ? String(snap.asin || "").trim().toUpperCase()
+        : String(snap.store_sku || "").trim();
+
+      if (Number.isFinite(price) && key && storeSkuForObserve) {
+        if (this.observeAllowed(key, price)) {
+          const payload = {
+            store: site,
+            store_sku: storeSkuForObserve,
+            price_cents: price,
+            title: snap.title || "",
+            observed_at: new Date().toISOString(),
+          };
+
+          if (site === "bestbuy") {
+              payload.url = String(location.href || "");
+          }
+
+          // Fire and forget, but remember only if it succeeds
+          safeSend({ type: "OBSERVE_PRICE", payload }).then((r) => {
+            if (r?.ok) this.observeRemember(key, price);
+          }).catch(() => {});
+        }
+      }
+    }
     await safeSet({ lastSnapshot: snap });
 
     // Footer dashboard link
@@ -537,7 +773,7 @@ async populate() {
         if (!snap.store_sku) return null;
         return await safeSend({
           type: "RESOLVE_COMPARE_REQUEST",
-          payload: { store: D.store, store_sku: snap.store_sku },
+          payload: { store: site, store_sku: snap.store_sku },
         });
       }
     };
@@ -566,6 +802,13 @@ async populate() {
         list = [];
       }
     }
+
+    // Recall alert (from catalog.recall_url surfaced as recall_url on results)
+    const recallUrl = Array.isArray(list)
+      ? (list.find(r => nonEmpty(r?.recall_url))?.recall_url || null)
+      : null;
+
+    setRecallAlert(sh, recallUrl);
 
     {
       const warnEl = sh.querySelector("#ps-warn");
@@ -626,7 +869,7 @@ async populate() {
 
     const ICON = (k) => ICONS[k] || ICONS.default;
 
-    const currentStore = storeKey(D.store);
+    const currentStore = storeKey(site);
     // (currentRow currently unused, but kept for future)
     // const currentRow = priced.find((r) => storeKey(r.store) === currentStore);
 
