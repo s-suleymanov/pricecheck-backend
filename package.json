@@ -5,7 +5,9 @@
   "main": "background.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "start": "node server.js"
+    "start": "node server.js",
+    "build:content": "esbuild src_content/index.js --bundle --format=iife --target=chrome109 --outfile=content.bundle.js",
+    "dev:content": "esbuild src_content/index.js --bundle --format=iife --target=chrome109 --outfile=content.bundle.js --watch"
   },
   "keywords": [],
   "author": "",
@@ -16,5 +18,8 @@
     "express": "^5.1.0",
     "pg": "^8.16.3",
     "sqlite3": "^5.1.7"
+  },
+  "devDependencies": {
+    "esbuild": "^0.27.2"
   }
 }

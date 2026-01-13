@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "PriceCheck: Your All-in-One Shopping Assistant",
-  "version": "0.9.0",
+  "version": "0.9.0.1",
   "description": "PriceCheck instantly compares prices across stores to help you find the best deal.",
   "action": {"default_title":"Toggle PriceCheck"},
   "permissions": ["scripting", "storage"],
@@ -10,7 +10,6 @@
     "https://*.target.com/*",
     "https://*.walmart.com/*",
     "https://*.bestbuy.com/*",
-    "https://*.apple.com/*",
     "https://pricecheck-extension.onrender.com/*"
   ],
   "background": { "service_worker": "background.js" },
@@ -20,6 +19,12 @@
     "48": "icons/logo.png",
     "128": "icons/logo.png"
   },
+  "content_scripts": [
+    {
+      "matches": ["*://*.amazon.com/*", "*://*.target.com/*", "*://*.walmart.com/*", "*://*.bestbuy.com/*"],
+      "js": ["content.bundle.js"]
+    }
+  ],
   "web_accessible_resources": [
     {
       "resources": ["content.html", "content.css", "icons/*"],
