@@ -3,6 +3,13 @@ const express = require("express");
 const { Pool } = require("pg");
 
 const app = express();
+console.log("SERVER.JS LOADED: UPSERT_BUILD_2026_01_15");
+
+
+app.use((req, _res, next) => {
+  console.log("REQ", req.method, req.path, "q=", req.url?.split("?")[1] || "");
+  next();
+});
 
 // ---------- Middleware ----------
 app.use(express.json({ limit: "256kb" }));
@@ -90,11 +97,10 @@ function normPci(v) {
 // ---------- Health ----------
 app.get("/health", (_req, res) => res.json({ ok: true, version: "listings-only-1.0" }));
 
-// ---------- Compare by ASIN / UPC / PCI (GET) ----------
-// /v1/compare?asin=B0.... OR /v1/compare?upc=... OR /v1/compare?pci=...
-// IMPORTANT: ASIN is input-only. We never match listings by ASIN except to resolve PCI/UPC.
-// All cross-store matching is PCI/UPC only.
 app.get("/v1/compare", async (req, res) => {
+  if (!allowRate(req, 240, 10 * 60 * 1000)) {
+    return res.status(429).json({ results: [], error: "rate_limited" });
+  }
   const asin = toASIN(req.query.asin);
   const upcNorm = normUPC(req.query.upc);
   const pci = normPci(req.query.pci);
@@ -138,7 +144,16 @@ app.get("/v1/compare", async (req, res) => {
           store, store_sku, upc, pci, offer_tag,
           current_price_cents as price_cents,
           current_price_observed_at as observed_at,
-          url, title
+          url, title,
+          coupon_text,
+          coupon_type,
+          coupon_value_cents,
+          coupon_value_pct,
+          coupon_requires_clip,
+          coupon_code,
+          coupon_expires_at,
+          effective_price_cents,
+          coupon_observed_at
         from public.listings
         where lower(btrim(store)) = 'amazon'
           and public.norm_sku(store_sku) = public.norm_sku($1)
@@ -161,6 +176,15 @@ app.get("/v1/compare", async (req, res) => {
         title: r.title || null,
         brand: null,
         category: null,
+        coupon_text: r.coupon_text || null,
+        coupon_type: r.coupon_type || null,
+        coupon_value_cents: Number.isFinite(r.coupon_value_cents) ? r.coupon_value_cents : null,
+        coupon_value_pct: (r.coupon_value_pct == null ? null : Number(r.coupon_value_pct)),
+        coupon_requires_clip: r.coupon_requires_clip === true,
+        coupon_code: r.coupon_code || null,
+        coupon_expires_at: r.coupon_expires_at || null,
+        effective_price_cents: Number.isFinite(r.effective_price_cents) ? r.effective_price_cents : null,
+        coupon_observed_at: r.coupon_observed_at || null,
         currency: "USD",
         match_strength: 3,
       }));
@@ -180,7 +204,12 @@ app.get("/v1/compare", async (req, res) => {
           (case when $1::text <> '' then public.norm_upc($1::text) else null end) as upc_key
       ),
       meta AS (
-        SELECT c.brand, c.category, COALESCE(c.dropship_warning, false) AS dropship_warning, c.recall_url AS recall_url
+        SELECT 
+          c.brand,
+          c.category, 
+          COALESCE(c.dropship_warning, false) AS dropship_warning, 
+          COALESCE(c.coverage_warning, false) AS coverage_warning,
+          c.recall_url AS recall_url
         FROM public.catalog c
         CROSS JOIN anchor a
         WHERE
@@ -205,13 +234,23 @@ app.get("/v1/compare", async (req, res) => {
           l.upc,
           l.pci,
           l.offer_tag,
-          l.current_price_cents AS price_cents,
+          l.current_price_cents::int AS price_cents,
           l.current_price_observed_at AS observed_at,
           l.url,
           l.title,
+          l.coupon_text,
+          l.coupon_type,
+          l.coupon_value_cents::int AS coupon_value_cents,
+          l.coupon_value_pct::float8 AS coupon_value_pct,
+          l.coupon_requires_clip,
+          l.coupon_code,
+          l.coupon_expires_at,
+          l.effective_price_cents::int AS effective_price_cents,
+          l.coupon_observed_at,
           m.brand,
           m.category,
           m.dropship_warning AS dropship_warning,
+          m.coverage_warning AS coverage_warning,
           m.recall_url AS recall_url,
           CASE
             WHEN a.pci_key IS NOT NULL
@@ -262,10 +301,20 @@ app.get("/v1/compare", async (req, res) => {
         r.url ||
         (normStore(r.store) === "amazon" && r.store_sku ? `https://www.amazon.com/dp/${toASIN(r.store_sku)}` : null),
       title: r.title || null,
+      coupon_text: r.coupon_text || null,
+      coupon_type: r.coupon_type || null,
+      coupon_value_cents: Number.isFinite(r.coupon_value_cents) ? r.coupon_value_cents : null,
+      coupon_value_pct: (r.coupon_value_pct == null ? null : Number(r.coupon_value_pct)),
+      coupon_requires_clip: r.coupon_requires_clip === true,
+      coupon_code: r.coupon_code || null,
+      coupon_expires_at: r.coupon_expires_at || null,
+      effective_price_cents: Number.isFinite(r.effective_price_cents) ? r.effective_price_cents : null,
+      coupon_observed_at: r.coupon_observed_at || null,
       brand: r.brand || null,
       category: r.category || null,
       dropship_warning: !!r.dropship_warning,
       recall_url: r.recall_url || null,
+      coverage_warning: !!r.coverage_warning,
       currency: "USD",
       match_strength: r.match_strength ?? null,
     }));
@@ -278,6 +327,9 @@ app.get("/v1/compare", async (req, res) => {
 });
 
 app.get("/v1/compare_by_store_sku", async (req, res) => {
+  if (!allowRate(req, 240, 10 * 60 * 1000)) {
+    return res.status(429).json({ results: [], error: "rate_limited" });
+  }
   const store = normStore(req.query.store);
   const storeSku = normSku(req.query.store_sku);
 
@@ -313,7 +365,12 @@ app.get("/v1/compare_by_store_sku", async (req, res) => {
           (case when $1::text <> '' then public.norm_upc($1::text) else null end) as upc_key
       ),
       meta AS (
-        SELECT c.brand, c.category, COALESCE(c.dropship_warning, false) AS dropship_warning, c.recall_url AS recall_url
+        SELECT 
+        c.brand, 
+        c.category, 
+        COALESCE(c.dropship_warning, false) AS dropship_warning,
+        COALESCE(c.coverage_warning, false) AS coverage_warning, 
+        c.recall_url AS recall_url
         FROM public.catalog c
         CROSS JOIN anchor a
         WHERE
@@ -329,13 +386,23 @@ app.get("/v1/compare_by_store_sku", async (req, res) => {
         l.upc,
         l.pci,
         l.offer_tag,
-        l.current_price_cents AS price_cents,
+        l.current_price_cents::int AS price_cents,
         l.current_price_observed_at AS observed_at,
         l.url,
         l.title,
+        l.coupon_text,
+        l.coupon_type,
+        l.coupon_value_cents::int AS coupon_value_cents,
+        l.coupon_value_pct::float8 AS coupon_value_pct,
+        l.coupon_requires_clip,
+        l.coupon_code,
+        l.coupon_expires_at,
+        l.effective_price_cents::int AS effective_price_cents,
+        l.coupon_observed_at,
         m.brand,
         m.category,
         m.dropship_warning AS dropship_warning,
+        m.coverage_warning AS coverage_warning,
         m.recall_url AS recall_url,
         CASE
           WHEN lower(regexp_replace(btrim(l.store), '[^a-z0-9]', '', 'g')) = a.anchor_store
@@ -377,10 +444,20 @@ app.get("/v1/compare_by_store_sku", async (req, res) => {
       seen_at: r.observed_at || null,
       url: r.url || (normStore(r.store) === "amazon" && r.store_sku ? `https://www.amazon.com/dp/${toASIN(r.store_sku)}` : null),
       title: r.title || null,
+      coupon_text: r.coupon_text || null,
+      coupon_type: r.coupon_type || null,
+      coupon_value_cents: Number.isFinite(r.coupon_value_cents) ? r.coupon_value_cents : null,
+      coupon_value_pct: (r.coupon_value_pct == null ? null : Number(r.coupon_value_pct)),
+      coupon_requires_clip: r.coupon_requires_clip === true,
+      coupon_code: r.coupon_code || null,
+      coupon_expires_at: r.coupon_expires_at || null,
+      effective_price_cents: Number.isFinite(r.effective_price_cents) ? r.effective_price_cents : null,
+      coupon_observed_at: r.coupon_observed_at || null,
       brand: r.brand || null,
       category: r.category || null,
       dropship_warning: r.dropship_warning === true,
       recall_url: r.recall_url || null,
+      coverage_warning: r.coverage_warning === true,
       currency: "USD",
       match_strength: r.match_strength ?? null,
     }));
@@ -395,8 +472,11 @@ app.get("/v1/compare_by_store_sku", async (req, res) => {
   }
 });
 
-app.post("/v1/observe", async (req, res) => { 
+app.post("/v1/observe", async (req, res) => {
   try {
+    if (!allowRate(req, 600, 10 * 60 * 1000)) {
+      return res.status(429).json({ ok: false, error: "rate_limited" });
+    }
     const p = req.body || {};
     const observedAt = p.observed_at ? new Date(p.observed_at) : new Date();
     const store = normStore(p.store);
@@ -407,30 +487,144 @@ app.post("/v1/observe", async (req, res) => {
       return res.status(400).json({ ok: false, error: "missing store/store_sku/price_cents" });
     }
 
-    // A) Insert history (dedupe allowed if you have a constraint)
+    // Coupon fields (optional)
+    const coupon_text = typeof p.coupon_text === "string" ? p.coupon_text.trim() : null;
+    const coupon_type = typeof p.coupon_type === "string" ? p.coupon_type.trim() : null;
+    const coupon_value_cents =
+      p.coupon_value_cents == null ? null : Number(p.coupon_value_cents);
+    const coupon_value_pct =
+      p.coupon_value_pct == null ? null : Number(p.coupon_value_pct);
+    const coupon_requires_clip = p.coupon_requires_clip === true;
+    const coupon_code = typeof p.coupon_code === "string" ? p.coupon_code.trim() : null;
+    const coupon_expires_at = p.coupon_expires_at ? new Date(p.coupon_expires_at) : null;
+    const effective_price_cents =
+      p.effective_price_cents == null ? null : Number(p.effective_price_cents);
+    const hasEffectiveCoupon = Number.isFinite(effective_price_cents);
+    const coupon_observed_at = p.coupon_observed_at ? new Date(p.coupon_observed_at) : null;
+
+    
+    // A) Insert history row (now with coupon columns)
     await pool.query(
       `
-      INSERT INTO public.price_history (store, store_sku, price_cents, observed_at)
-      VALUES ($1, $2, $3, $4)
-      ON CONFLICT DO NOTHING
+      INSERT INTO public.price_history (
+        store, store_sku, price_cents, observed_at,
+        url, title, upc, pci,
+        coupon_text, coupon_value_cents, coupon_value_pct, effective_price_cents
+      )
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
       `,
-      [store, storeSku, priceCents, observedAt]
+      [
+        store,
+        storeSku,
+        priceCents,
+        observedAt,
+        p.url ? String(p.url) : null,
+        p.title ? String(p.title) : null,
+        p.upc ? String(p.upc) : null,
+        p.pci ? String(p.pci) : null,
+
+        hasEffectiveCoupon ? coupon_text : null,
+        hasEffectiveCoupon && Number.isFinite(coupon_value_cents) ? coupon_value_cents : null,
+        hasEffectiveCoupon && Number.isFinite(coupon_value_pct) ? coupon_value_pct : null,
+        hasEffectiveCoupon ? effective_price_cents : null,
+      ]
     );
 
-    // B) Update listings current price (only the 2 fields)
-    const up = await pool.query(
+        // B) Upsert listing row (create if missing, update if newer)
+    const upListing = await pool.query(
       `
-      UPDATE public.listings
-         SET current_price_cents = $1,
-             current_price_observed_at = $2
-       WHERE lower(btrim(store)) = lower(btrim($3))
-         AND norm_sku(store_sku) = norm_sku($4)
-         AND (current_price_observed_at IS NULL OR $2 >= current_price_observed_at)
+      INSERT INTO public.listings (
+        store,
+        store_sku,
+        current_price_cents,
+        current_price_observed_at,
+        url,
+        title,
+        upc,
+        pci,
+        status
+      )
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'active')
+      ON CONFLICT (store, store_sku)
+      DO UPDATE SET
+        current_price_cents = CASE
+          WHEN public.listings.current_price_observed_at IS NULL
+            OR EXCLUDED.current_price_observed_at >= public.listings.current_price_observed_at
+          THEN EXCLUDED.current_price_cents
+          ELSE public.listings.current_price_cents
+        END,
+        current_price_observed_at = CASE
+          WHEN public.listings.current_price_observed_at IS NULL
+            OR EXCLUDED.current_price_observed_at >= public.listings.current_price_observed_at
+          THEN EXCLUDED.current_price_observed_at
+          ELSE public.listings.current_price_observed_at
+        END,
+        url = COALESCE(NULLIF(EXCLUDED.url, ''), public.listings.url),
+        title = COALESCE(NULLIF(EXCLUDED.title, ''), public.listings.title),
+        upc = COALESCE(NULLIF(EXCLUDED.upc, ''), public.listings.upc),
+        pci = COALESCE(NULLIF(EXCLUDED.pci, ''), public.listings.pci),
+        status = COALESCE(NULLIF(EXCLUDED.status, ''), public.listings.status)
+        RETURNING id, store, store_sku, current_price_cents, current_price_observed_at, (xmax = 0) as inserted
       `,
-      [priceCents, observedAt, store, storeSku]
+      [
+        store,
+        storeSku,
+        priceCents,
+        observedAt,
+        p.url ? String(p.url) : null,
+        p.title ? String(p.title) : null,
+        p.upc ? String(p.upc) : null,
+        p.pci ? String(p.pci) : null,
+      ]
     );
 
-    return res.json({ ok: true, listingUpdated: up.rowCount > 0 });
+    // C) Update coupon fields in listings when we have any coupon signal
+    // Rule: only overwrite when coupon_observed_at is newer, otherwise keep existing.
+    const hasAnyCouponSignal = Number.isFinite(effective_price_cents);
+
+    let upCoupon = { rowCount: 0 };
+
+    if (hasAnyCouponSignal) {
+      const couponAt = coupon_observed_at || observedAt;
+
+      upCoupon = await pool.query(
+        `
+        UPDATE public.listings
+           SET coupon_text = $1,
+               coupon_type = $2,
+               coupon_value_cents = $3,
+               coupon_value_pct = $4,
+               coupon_requires_clip = $5,
+               coupon_code = $6,
+               coupon_expires_at = $7,
+               effective_price_cents = $8,
+               coupon_observed_at = $9
+         WHERE lower(btrim(store)) = lower(btrim($10))
+           AND norm_sku(store_sku) = norm_sku($11)
+           AND (coupon_observed_at IS NULL OR $9 >= coupon_observed_at)
+        `,
+        [
+          coupon_text,
+          coupon_type,
+          Number.isFinite(coupon_value_cents) ? coupon_value_cents : null,
+          Number.isFinite(coupon_value_pct) ? coupon_value_pct : null,
+          coupon_requires_clip,
+          coupon_code,
+          coupon_expires_at,
+          Number.isFinite(effective_price_cents) ? effective_price_cents : null,
+          couponAt,
+          store,
+          storeSku,
+        ]
+      );
+    }
+
+   return res.json({
+    ok: true,
+    listingRowCount: upListing?.rowCount ?? 0,
+    listingRow: upListing?.rows?.[0] ?? null,
+    couponRowCount: upCoupon?.rowCount ?? 0,
+  });
   } catch (e) {
     console.error("observe error:", e);
     return res.status(500).json({ ok: false });

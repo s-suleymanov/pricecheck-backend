@@ -41,6 +41,17 @@ export function initPriceCheck() {
 
     const storeKey = (s) => String(s || "").toLowerCase().replace(/[^a-z0-9]/g, "");
 
+    function couponPillHTML(p) {
+        const t = String(p?.coupon_text || "").trim();
+        if (!t) return "";
+
+        const clip = p?.coupon_requires_clip === true ? " · clip" : "";
+        const code = String(p?.coupon_code || "").trim();
+        const codeTxt = code ? ` · code ${escHtml(code)}` : "";
+
+        return `<span class="coupon-pill">${escHtml(t)}${clip}${codeTxt}</span>`;
+    }
+
     const STORE_LABELS = {
         amazon: "Amazon",
         target: "Target",

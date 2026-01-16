@@ -167,7 +167,14 @@
             warnEl.hidden = !show;
         }
         }
-
+        // Coverage warning
+        {
+        const covEl = root.querySelector("#ps-limited");
+        if (covEl) {
+            const show = Array.isArray(list) && list.some((r) => r?.coverage_warning === true);
+            covEl.hidden = !show;
+        }
+        }
         if (list.length) {
         this.lastGood.set(keyNow, { at: Date.now(), results: list.slice() });
         }
@@ -196,8 +203,11 @@
         return;
         }
 
+        const priceFor = (p) =>
+            Number.isFinite(p?.effective_price_cents) ? p.effective_price_cents : p.price_cents;
+
         // Only keep entries with real prices
-        const priced = list.filter((p) => Number.isFinite(p?.price_cents));
+        const priced = list.filter((p) => Number.isFinite(priceFor(p)));
         if (!priced.length) {
         statusEl.textContent = "Matches found, but no stored prices yet.";
         const w = root.querySelector("#ps-warn");
@@ -207,13 +217,13 @@
         }
 
         // Sort cheapest -> most expensive
-        priced.sort((a, b) => a.price_cents - b.price_cents);
+        priced.sort((a, b) => priceFor(a) - priceFor(b));
 
         const ICON = (k) => ICONS[k] || ICONS.default;
 
         const currentStore = storeKey(site);
-        const cheapestPrice = priced[0].price_cents;
-        const mostExpensivePrice = priced[priced.length - 1].price_cents;
+        const cheapestPrice = priceFor(priced[0]);
+        const mostExpensivePrice = priceFor(priced[priced.length - 1]);
 
         priced.forEach((p) => {
         const storeLower = storeKey(p.store);
@@ -221,7 +231,7 @@
 
         let tagsHTML = "";
 
-        if (p.price_cents === cheapestPrice && mostExpensivePrice > cheapestPrice) {
+        if (priceFor(p) === cheapestPrice && mostExpensivePrice > cheapestPrice) {
             const diff = (mostExpensivePrice - cheapestPrice) / 100;
             tagsHTML += `<span class="savings-tag">Save $${diff.toFixed(2)}</span>`;
         }
@@ -234,21 +244,23 @@
         card.target = "_blank";
 
         const offerPillHTML = offerTagPill(p.offer_tag, isCurrentSite);
+        const couponHTML = couponPillHTML(p);
 
         card.innerHTML = `
-            <div class="store-info">
+        <div class="store-info">
             <img src="${ICON(storeLower)}" class="store-logo" />
             <div class="store-and-product">
-                <div class="store-line">
+            <div class="store-line">
                 <span class="store-name">${escHtml(storeLabel(p.store))}</span>
                 ${offerPillHTML}
-                </div>
+                ${couponHTML}
             </div>
             </div>
-            <div class="price-info">
-            <span class="price">$${(p.price_cents / 100).toFixed(2)}</span>
+        </div>
+        <div class="price-info">
+            <span class="price">$${(priceFor(p) / 100).toFixed(2)}</span>
             ${tagsHTML}
-            </div>
+        </div>
         `;
 
         resultsEl.appendChild(card);
