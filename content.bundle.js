@@ -309,11 +309,26 @@
           return null;
         },
         getStoreSKU() {
-          const href = String(location.href);
+          const href = String(location.href || "");
+
+          // 0) If Target URL has ?preselect=########, that is the *selected variant* TCIN.
+          // Example: /p/-/A-89401491?preselect=89401491
+          // Some pages use A- as the parent and preselect as the actual variant to compare.
+          try {
+            const u = new URL(href);
+            const pre = (u.searchParams.get("preselect") || "").trim();
+            if (/^\d{8}$/.test(pre)) return pre;
+
+            // Also allow ?tcin=######## as a secondary query-param fallback
+            const qp = (u.searchParams.get("tcin") || "").trim();
+            if (/^\d{8}$/.test(qp)) return qp;
+          } catch {}
+
+          // 1) Standard canonical pattern: /-/A-########
           let m = href.match(/\/-\/A-(\d{8})(?:\b|\/|\?|#)/i);
           if (m) return m[1];
-          const qp = new URL(href).searchParams.get("tcin");
-          if (qp && /^\d{8}$/.test(qp)) return qp;
+
+          // 2) Script sniff fallback (kept)
           const scripts = document.querySelectorAll("script");
           for (const s of scripts) {
             const txt = s.textContent || "";
@@ -968,7 +983,7 @@
         tab.style.top = "auto";
         tab.style.left = "0px";
         tab.style.bottom = "25px";
-        tab.style.width = "100px";
+        tab.style.width = "80px";
         tab.style.height = "50px";
         tab.style.borderRadius = "0 14px 14px 0";
         tab.style.borderLeft = "0";
@@ -1009,8 +1024,8 @@
           this.showFromCollapsed();
         });
 
-      const W0 = "100px";
-      const W1 = "110px";
+      const W0 = "80px";
+      const W1 = "90px";
 
       tab.addEventListener("mouseenter", () => {
         tab.style.width = W1;
