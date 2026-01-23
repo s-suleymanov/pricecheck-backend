@@ -106,6 +106,43 @@
       return raw.toLowerCase().replace(/\b[a-z]/g, (c) => c.toUpperCase());
     };
 
+  function bestBuyUrlFromSku(sku) {
+    const s = String(sku || "").trim();
+    if (!/^\d{4,10}$/.test(s)) return "";
+    return `https://www.bestbuy.com/site/${s}.p?skuId=${s}`;
+  }
+
+  function walmartUrlFromItemId(itemId) {
+    const s = String(itemId || "").trim();
+    if (!/^\d{6,20}$/.test(s)) return "";
+    return `https://www.walmart.com/ip/${s}`;
+  }
+
+  function targetUrlFromTcin(tcin) {
+    const s = String(tcin || "").trim();
+    if (!/^\d{8}$/.test(s)) return "";
+    return `https://www.target.com/p/-/A-${s}`;
+  }
+
+  function amazonUrlFromAsin(asin) {
+    const s = String(asin || "").trim().toUpperCase();
+    if (!/^[A-Z0-9]{10}$/.test(s)) return "";
+    return `https://www.amazon.com/dp/${s}`;
+  }
+
+  function derivedUrlForOffer(p) {
+    const store = storeKey(p?.store);
+    const sku = String(p?.store_sku || "").trim();
+
+    if (store === "amazon") return amazonUrlFromAsin(sku);
+    if (store === "walmart") return walmartUrlFromItemId(sku);
+    if (store === "target") return targetUrlFromTcin(sku);
+    if (store === "bestbuy" || store === "bby") return bestBuyUrlFromSku(sku);
+
+    // For small stores: keep stored URL if present
+    return String(p?.url || "").trim();
+  }
+
     function getAmazonPriceCents() {
       const toCents2 = (s) => {
         const n = parseFloat(String(s || "").replace(/[^0-9.]/g, ""));
@@ -368,22 +405,65 @@
           return null;
         },
         getStoreSKU() {
-          const meta = document.querySelector('meta[itemprop="sku"]')?.content;
-          if (meta && /^\d{4,10}$/.test(meta)) return meta;
+        // 1) Canonical URL usually contains the real numeric SKU
+        const canon = document.querySelector('link[rel="canonical"]')?.href || "";
+        let m = canon.match(/\/(\d{4,10})\.p(?:\?|$)/i) || canon.match(/[?&]skuId=(\d{4,10})(?:&|$)/i);
+        if (m) return m[1];
 
-          const scripts = document.querySelectorAll("script");
-          for (const s of scripts) {
-            const txt = s.textContent || "";
-            const m = txt.match(/"skuId"\s*:\s*"([0-9]{4,10})"/i);
-            if (m) return m[1];
-          }
+        // 2) og:url also often contains it
+        const og = document.querySelector('meta[property="og:url"]')?.content || "";
+        m = og.match(/\/(\d{4,10})\.p(?:\?|$)/i) || og.match(/[?&]skuId=(\d{4,10})(?:&|$)/i);
+        if (m) return m[1];
 
-          const bodyText = document.body.innerText || "";
-          const m2 = bodyText.match(/\bSKU\s*:?[\s#]*([0-9]{4,10})\b/i);
-          if (m2) return m2[1];
+        // 3) JSON-LD Product schema (very reliable when present)
+        const ld = Array.from(document.querySelectorAll('script[type="application/ld+json"]'));
+        for (const s of ld) {
+          const txt = s.textContent || "";
+          if (!txt.includes("Product") || !txt.includes("sku")) continue;
+          try {
+            const data = JSON.parse(txt);
 
-          return null;
-        },
+            const walk = (node) => {
+              if (!node) return null;
+              if (Array.isArray(node)) {
+                for (const it of node) {
+                  const r = walk(it);
+                  if (r) return r;
+                }
+                return null;
+              }
+              if (typeof node === "object") {
+                const t = node["@type"];
+                const isProduct =
+                  (typeof t === "string" && t.toLowerCase() === "product") ||
+                  (Array.isArray(t) && t.map(String).some((x) => x.toLowerCase() === "product"));
+
+                const sku = String(node.sku || "").trim();
+                if (isProduct && /^\d{4,10}$/.test(sku)) return sku;
+
+                // handle @graph
+                if (node["@graph"]) return walk(node["@graph"]);
+                for (const k of Object.keys(node)) {
+                  const r = walk(node[k]);
+                  if (r) return r;
+                }
+              }
+              return null;
+            };
+
+            const found = walk(data);
+            if (found) return found;
+          } catch {}
+        }
+
+        // 4) meta itemprop sku
+        const meta = document.querySelector('meta[itemprop="sku"]')?.content || "";
+        if (/^\d{4,10}$/.test(meta)) return meta;
+
+        // Last resort: do NOT scan full body text, it is too noisy on BestBuy
+        return null;
+      }
+      ,
       },
     };
 
@@ -695,6 +775,7 @@
       samsung: chrome.runtime.getURL("icons/samsung.webp"),
       lg: chrome.runtime.getURL("icons/lg.webp"),
       segway: chrome.runtime.getURL("icons/segway.webp"),
+      beats: chrome.runtime.getURL("icons/beats.png"),
       default: chrome.runtime.getURL("icons/logo.png"),
       dji: chrome.runtime.getURL("icons/dji.webp"),
       hiboy: chrome.runtime.getURL("icons/hiboy.webp"),
@@ -1181,8 +1262,6 @@
                   observed_at: new Date().toISOString(),
                 };
 
-                if (site === "bestbuy") payload.url = String(location.href || "");
-
                 if (site === "amazon") {
                   const c = getAmazonCouponSnap();
                   if (c && Number.isFinite(c.effective_price_cents)) {
@@ -1400,7 +1479,8 @@
             const card = document.createElement("a");
             card.className = "result-card";
             if (isCurrentSite) card.classList.add("current-site");
-            card.href = p.url || "#";
+            const href = derivedUrlForOffer(p);
+            card.href = href || "#";
             card.target = "_blank";
 
             const offerPillHTML = offerTagPill(p.offer_tag);
