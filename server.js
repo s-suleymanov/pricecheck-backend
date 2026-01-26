@@ -502,27 +502,26 @@ app.post("/v1/observe", async (req, res) => {
     const hasEffectiveCoupon = Number.isFinite(effective_price_cents);
     const coupon_observed_at = p.coupon_observed_at ? new Date(p.coupon_observed_at) : null;
 
-    
-    // A) Insert history row (now with coupon columns)
+    // A) Insert history row (price_history only stores changing stuff)
     await pool.query(
       `
       INSERT INTO public.price_history (
-        store, store_sku, price_cents, observed_at,
-        url, title, upc, pci,
-        coupon_text, coupon_value_cents, coupon_value_pct, effective_price_cents
+        store,
+        store_sku,
+        price_cents,
+        observed_at,
+        coupon_text,
+        coupon_value_cents,
+        coupon_value_pct,
+        effective_price_cents
       )
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
       `,
       [
         store,
         storeSku,
         priceCents,
         observedAt,
-        p.url ? String(p.url) : null,
-        p.title ? String(p.title) : null,
-        p.upc ? String(p.upc) : null,
-        p.pci ? String(p.pci) : null,
-
         hasEffectiveCoupon ? coupon_text : null,
         hasEffectiveCoupon && Number.isFinite(coupon_value_cents) ? coupon_value_cents : null,
         hasEffectiveCoupon && Number.isFinite(coupon_value_pct) ? coupon_value_pct : null,
@@ -627,9 +626,9 @@ app.post("/v1/observe", async (req, res) => {
     couponRowCount: upCoupon?.rowCount ?? 0,
   });
   } catch (e) {
-    console.error("observe error:", e);
-    return res.status(500).json({ ok: false });
-  }
+  console.error("observe error:", e?.stack || e);
+  return res.status(500).json({ ok: false, error: String(e?.message || e) });
+}
 });
 
 // ---------- Start ----------
