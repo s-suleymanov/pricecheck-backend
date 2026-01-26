@@ -545,7 +545,8 @@ app.post("/v1/observe", async (req, res) => {
         status
       )
       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'active')
-      ON CONFLICT (store, store_sku)
+      ON CONFLICT (lower(btrim(store)), norm_sku(store_sku))
+      WHERE (store_sku IS NOT NULL AND btrim(store_sku) <> '')
       DO UPDATE SET
         current_price_cents = CASE
           WHEN public.listings.current_price_observed_at IS NULL
