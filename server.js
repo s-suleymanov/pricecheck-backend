@@ -3,7 +3,7 @@ const express = require("express");
 const { Pool } = require("pg");
 
 const app = express();
-console.log("SERVER.JS LOADED: UPSERT_BUILD_2026_01_15");
+console.log("SERVER.JS LOADED: UPSERT_BUILD_2026_04_03");
 
 
 app.use((req, _res, next) => {
@@ -133,9 +133,6 @@ app.get("/v1/compare", async (req, res) => {
     return res.status(400).json({ results: [], error: "need asin or upc or pci" });
   }
 
-  // If ASIN was provided but we could not resolve PCI/UPC,
-  // optionally return the Amazon listing row only (so Amazon pages still show something).
-  // If you prefer to return empty instead, remove this block.
   if (asin && !upcKey && !pciKey) {
     try {
       const rOnly = await pool.query(
@@ -144,7 +141,7 @@ app.get("/v1/compare", async (req, res) => {
           store, store_sku, upc, pci, offer_tag,
           current_price_cents as price_cents,
           current_price_observed_at as observed_at,
-          url, title,
+          url,
           coupon_text,
           coupon_type,
           coupon_value_cents,
@@ -173,7 +170,6 @@ app.get("/v1/compare", async (req, res) => {
         price_cents: Number.isFinite(r.price_cents) ? r.price_cents : null,
         seen_at: r.observed_at || null,
         url: r.url || (r.store_sku ? `https://www.amazon.com/dp/${toASIN(r.store_sku)}` : null),
-        title: r.title || null,
         brand: null,
         category: null,
         coupon_text: r.coupon_text || null,
@@ -237,7 +233,6 @@ app.get("/v1/compare", async (req, res) => {
           l.current_price_cents::int AS price_cents,
           l.current_price_observed_at AS observed_at,
           l.url,
-          l.title,
           l.coupon_text,
           l.coupon_type,
           l.coupon_value_cents::int AS coupon_value_cents,
@@ -300,7 +295,6 @@ app.get("/v1/compare", async (req, res) => {
       url:
         r.url ||
         (normStore(r.store) === "amazon" && r.store_sku ? `https://www.amazon.com/dp/${toASIN(r.store_sku)}` : null),
-      title: r.title || null,
       coupon_text: r.coupon_text || null,
       coupon_type: r.coupon_type || null,
       coupon_value_cents: Number.isFinite(r.coupon_value_cents) ? r.coupon_value_cents : null,
@@ -389,7 +383,6 @@ app.get("/v1/compare_by_store_sku", async (req, res) => {
         l.current_price_cents::int AS price_cents,
         l.current_price_observed_at AS observed_at,
         l.url,
-        l.title,
         l.coupon_text,
         l.coupon_type,
         l.coupon_value_cents::int AS coupon_value_cents,
@@ -443,7 +436,6 @@ app.get("/v1/compare_by_store_sku", async (req, res) => {
       price_cents: Number.isFinite(r.price_cents) ? r.price_cents : null,
       seen_at: r.observed_at || null,
       url: r.url || (normStore(r.store) === "amazon" && r.store_sku ? `https://www.amazon.com/dp/${toASIN(r.store_sku)}` : null),
-      title: r.title || null,
       coupon_text: r.coupon_text || null,
       coupon_type: r.coupon_type || null,
       coupon_value_cents: Number.isFinite(r.coupon_value_cents) ? r.coupon_value_cents : null,
@@ -538,12 +530,11 @@ app.post("/v1/observe", async (req, res) => {
         current_price_cents,
         current_price_observed_at,
         url,
-        title,
         upc,
         pci,
         status
       )
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'active')
+      VALUES ($1,$2,$3,$4,$5,$6,$7,'active')
       ON CONFLICT (lower(btrim(store)), norm_sku(store_sku))
       WHERE (store_sku IS NOT NULL AND btrim(store_sku) <> '')
       DO UPDATE SET
@@ -560,7 +551,6 @@ app.post("/v1/observe", async (req, res) => {
           ELSE public.listings.current_price_observed_at
         END,
         url = COALESCE(NULLIF(EXCLUDED.url, ''), public.listings.url),
-        title = COALESCE(NULLIF(EXCLUDED.title, ''), public.listings.title),
         upc = COALESCE(NULLIF(EXCLUDED.upc, ''), public.listings.upc),
         pci = COALESCE(NULLIF(EXCLUDED.pci, ''), public.listings.pci),
         status = COALESCE(NULLIF(EXCLUDED.status, ''), public.listings.status)
@@ -572,7 +562,6 @@ app.post("/v1/observe", async (req, res) => {
         priceCents,
         observedAt,
         p.url ? String(p.url) : null,
-        p.title ? String(p.title) : null,
         p.upc ? String(p.upc) : null,
         p.pci ? String(p.pci) : null,
       ]
