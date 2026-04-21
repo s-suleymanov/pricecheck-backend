@@ -1,39 +1,42 @@
 {
   "manifest_version": 3,
-  "name": "PriceCheck: Your All-in-One Shopping Assistant",
-  "version": "0.9.1.4",
-  "description": "PriceCheck instantly compares prices across stores to help you find the best deal.",
-  "action": {"default_title":"Toggle PriceCheck"},
-  "permissions": ["scripting", "storage"],
+  "name": "PriceCheck",
+  "version": "0.9.2",
+  "description": "A more intelligent way to shop.",
+  "action": {
+    "default_title": "Open PriceCheck"
+  },
+  "permissions": ["storage", "sidePanel"],
   "host_permissions": [
     "https://*.amazon.com/*",
     "https://*.target.com/*",
     "https://*.walmart.com/*",
     "https://*.bestbuy.com/*",
-    "https://pricecheck-extension.onrender.com/*"
+    "https://pricecheck-extension.onrender.com/*",
+    "https://www.pricechecktool.com/*"
   ],
-  "background": { "service_worker": "background.js" },
-  "icons": {
-    "16": "icons/logo.png",
-    "32": "icons/logo.png",
-    "48": "icons/logo.png",
-    "128": "icons/logo.png"
+  "background": {
+    "service_worker": "background.js"
+  },
+  "side_panel": {
+    "default_path": "sidepanel.html"
   },
   "content_scripts": [
     {
-      "matches": ["*://*.amazon.com/*", "*://*.target.com/*", "*://*.walmart.com/*", "*://*.bestbuy.com/*"],
-      "js": ["content.bundle.js"]
-    }
-  ],
-  "web_accessible_resources": [
-    {
-      "resources": ["content.html", "content.css", "icons/*"],
       "matches": [
         "*://*.amazon.com/*",
         "*://*.target.com/*",
         "*://*.walmart.com/*",
         "*://*.bestbuy.com/*"
-      ]
+      ],
+      "js": ["content_observe.js"],
+      "run_at": "document_idle"
     }
-  ]
+  ],
+  "icons": {
+    "16": "icons/logo.png",
+    "32": "icons/logo.png",
+    "48": "icons/logo.png",
+    "128": "icons/logo.png"
+  }
 }

@@ -93,6 +93,19 @@ function normPci(v) {
   const t = String(v || "").trim();
   return t ? t : "";
 }
+function normComparableUrl(raw) {
+  let s = String(raw || "").trim();
+  if (!s) return "";
+
+  s = s.replace(/^https?:\/\//i, "");
+  s = s.replace(/^www\./i, "");
+  s = s.split("#")[0];
+  s = s.split("?")[0];
+  s = s.replace(/\/+$/, "");
+  s = s.toLowerCase();
+
+  return s;
+}
 
 // ---------- Health ----------
 app.get("/health", (_req, res) => res.json({ ok: true, version: "listings-only-1.0" }));
@@ -460,6 +473,186 @@ app.get("/v1/compare_by_store_sku", async (req, res) => {
     });
   } catch (e) {
     console.error("compare_by_store_sku error:", e);
+    return res.status(500).json({ results: [] });
+  }
+});
+
+app.get("/v1/compare_by_url", async (req, res) => {
+  if (!allowRate(req, 240, 10 * 60 * 1000)) {
+    return res.status(429).json({ results: [], error: "rate_limited" });
+  }
+
+  const rawUrl = String(req.query.url || "").trim();
+  const cmpUrl = normComparableUrl(rawUrl);
+
+  if (!cmpUrl) {
+    return res.status(400).json({ results: [], error: "url required" });
+  }
+
+  try {
+    const r1 = await pool.query(
+      `
+      SELECT store, store_sku, upc, pci, url
+      FROM public.listings
+      WHERE url IS NOT NULL
+        AND btrim(url) <> ''
+        AND regexp_replace(
+              regexp_replace(
+                lower(split_part(split_part(regexp_replace(btrim(url), '^https?://', '', 'i'), '?', 1), '#', 1)),
+                '^www\\.',
+                ''
+              ),
+              '/+$',
+              ''
+            ) = $1
+      ORDER BY current_price_observed_at DESC NULLS LAST, created_at DESC
+      LIMIT 1
+      `,
+      [cmpUrl]
+    );
+
+    if (!r1.rowCount) {
+      return res.json({ results: [], anchor: { url: rawUrl, normalized_url: cmpUrl } });
+    }
+
+    const upc = r1.rows[0]?.upc ? normUPC(r1.rows[0].upc) : "";
+    const pci = r1.rows[0]?.pci ? normPci(r1.rows[0].pci) : "";
+
+    const r2 = await pool.query(
+      `
+      WITH anchor AS (
+        SELECT
+          $1::text AS raw_url,
+          $2::text AS norm_url,
+          (CASE WHEN $4::text <> '' THEN upper(btrim($4::text)) ELSE null END) AS pci_key,
+          (CASE WHEN $3::text <> '' THEN public.norm_upc($3::text) ELSE null END) AS upc_key
+      ),
+      meta AS (
+        SELECT
+          c.brand,
+          c.category,
+          COALESCE(c.dropship_warning, false) AS dropship_warning,
+          COALESCE(c.coverage_warning, false) AS coverage_warning,
+          c.recall_url AS recall_url
+        FROM public.catalog c
+        CROSS JOIN anchor a
+        WHERE
+          (a.pci_key IS NOT NULL AND c.pci IS NOT NULL AND btrim(c.pci) <> '' AND upper(btrim(c.pci)) = a.pci_key)
+          OR
+          (a.upc_key IS NOT NULL AND c.upc IS NOT NULL AND btrim(c.upc) <> '' AND public.norm_upc(c.upc) = a.upc_key)
+        ORDER BY c.created_at DESC
+        LIMIT 1
+      )
+      SELECT
+        l.store,
+        l.store_sku,
+        l.upc,
+        l.pci,
+        l.offer_tag,
+        l.current_price_cents::int AS price_cents,
+        l.current_price_observed_at AS observed_at,
+        l.url,
+        l.coupon_text,
+        l.coupon_type,
+        l.coupon_value_cents::int AS coupon_value_cents,
+        l.coupon_value_pct::float8 AS coupon_value_pct,
+        l.coupon_requires_clip,
+        l.coupon_code,
+        l.coupon_expires_at,
+        l.effective_price_cents::int AS effective_price_cents,
+        l.coupon_observed_at,
+        m.brand,
+        m.category,
+        m.dropship_warning AS dropship_warning,
+        m.coverage_warning AS coverage_warning,
+        m.recall_url AS recall_url,
+        CASE
+          WHEN regexp_replace(
+                 regexp_replace(
+                   lower(split_part(split_part(regexp_replace(btrim(l.url), '^https?://', '', 'i'), '?', 1), '#', 1)),
+                   '^www\\.',
+                   ''
+                 ),
+                 '/+$',
+                 ''
+               ) = a.norm_url THEN 3
+          WHEN a.pci_key IS NOT NULL
+            AND l.pci IS NOT NULL AND btrim(l.pci) <> ''
+            AND upper(btrim(l.pci)) = a.pci_key THEN 2
+          WHEN a.upc_key IS NOT NULL
+            AND l.upc IS NOT NULL AND btrim(l.upc) <> ''
+            AND public.norm_upc(l.upc) = a.upc_key THEN 1
+          ELSE 0
+        END AS match_strength
+      FROM public.listings l
+      CROSS JOIN anchor a
+      LEFT JOIN meta m ON true
+      WHERE
+        (
+          l.url IS NOT NULL
+          AND btrim(l.url) <> ''
+          AND regexp_replace(
+                regexp_replace(
+                  lower(split_part(split_part(regexp_replace(btrim(l.url), '^https?://', '', 'i'), '?', 1), '#', 1)),
+                  '^www\\.',
+                  ''
+                ),
+                '/+$',
+                ''
+              ) = a.norm_url
+        )
+        OR
+        (a.pci_key IS NOT NULL AND l.pci IS NOT NULL AND btrim(l.pci) <> '' AND upper(btrim(l.pci)) = a.pci_key)
+        OR
+        (a.upc_key IS NOT NULL AND l.upc IS NOT NULL AND btrim(l.upc) <> '' AND public.norm_upc(l.upc) = a.upc_key)
+      ORDER BY
+        match_strength DESC,
+        price_cents ASC NULLS LAST,
+        observed_at DESC NULLS LAST,
+        l.store ASC
+      `,
+      [rawUrl, cmpUrl, upc || "", pci || ""]
+    );
+
+    const out = r2.rows.map((r) => ({
+      store: storeDisplay(r.store),
+      store_sku: r.store_sku || null,
+      asin: normStore(r.store) === "amazon" ? (r.store_sku ? toASIN(r.store_sku) : null) : null,
+      upc: r.upc || null,
+      pci: r.pci || null,
+      offer_tag: r.offer_tag || null,
+      price_cents: Number.isFinite(r.price_cents) ? r.price_cents : null,
+      seen_at: r.observed_at || null,
+      url: r.url || null,
+      coupon_text: r.coupon_text || null,
+      coupon_type: r.coupon_type || null,
+      coupon_value_cents: Number.isFinite(r.coupon_value_cents) ? r.coupon_value_cents : null,
+      coupon_value_pct: (r.coupon_value_pct == null ? null : Number(r.coupon_value_pct)),
+      coupon_requires_clip: r.coupon_requires_clip === true,
+      coupon_code: r.coupon_code || null,
+      coupon_expires_at: r.coupon_expires_at || null,
+      effective_price_cents: Number.isFinite(r.effective_price_cents) ? r.effective_price_cents : null,
+      coupon_observed_at: r.coupon_observed_at || null,
+      brand: r.brand || null,
+      category: r.category || null,
+      dropship_warning: r.dropship_warning === true,
+      recall_url: r.recall_url || null,
+      coverage_warning: r.coverage_warning === true,
+      currency: "USD",
+      match_strength: r.match_strength ?? null,
+    }));
+
+    return res.json({
+      results: out,
+      anchor: {
+        url: rawUrl,
+        normalized_url: cmpUrl,
+        upc: upc || null,
+        pci: pci || null,
+      },
+    });
+  } catch (e) {
+    console.error("compare_by_url error:", e);
     return res.status(500).json({ results: [] });
   }
 });

@@ -1,0 +1,232 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>PriceCheck</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Google+Sans:ital,opsz,wght@0,17..18,400..700;1,17..18,400..700&display=swap" rel="stylesheet">
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      width: 100%;
+      height: 100%;
+      background: #ffffff;
+      overflow: hidden;
+      font-family: "Google Sans", Arial, sans-serif;
+    }
+
+    #frame {
+      width: 100%;
+      height: 100%;
+      border: 0;
+      display: block;
+      background: #ffffff;
+    }
+
+    #loading,
+    #blocked,
+    #unsupported {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+      text-align: center;
+      color: #333;
+      background: #fff;
+    }
+
+    #blocked,
+    #unsupported {
+      display: none;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .pc-card {
+      max-width: 320px;
+      display: flex;
+      margin-bottom: 120px;
+      flex-direction: column;
+      gap: 14px;
+      align-items: center;
+    }
+
+    .pc-icon-wrap {
+      width: 88px;
+      height: 88px;
+      border-radius: 24px;
+      background: #f4f4f5;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .pc-icon-wrap img {
+      width: 56px;
+      height: 56px;
+    }
+
+    .pc-title {
+      font-size: 30px;
+      font-weight: 600;
+      color: #111827;
+    }
+
+    .pc-copy {
+      font-size: 15px;
+      line-height: 1.45;
+      color: #6b7280;
+    }
+
+    .pc-actions {
+        padding-top: 20px;
+        width: 100%;
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+    }
+
+.pc-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 46px;
+  padding: 0 18px;
+  border: 0;
+  border-radius: 27px;
+  background: #111827;
+  color: #fff;
+  text-decoration: none;
+  font-weight: 600;
+  width: 100%;
+  box-sizing: border-box;
+  cursor: pointer;
+  font-size: 18px;
+}
+
+.pc-btn:hover {
+  transform:scale(1.04);
+}
+
+.pc-btn-secondary {
+  background: #f4f4f5;
+  color: #111827;
+}
+
+.pc-loading-card {
+  gap: 16px;
+}
+
+.pc-loading-title {
+  min-height: 72px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.pc-loading-copy {
+  max-width: 290px;
+}
+
+.pc-loading-dots {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  height: 12px;
+}
+
+.pc-loading-dots span {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: #cbd5e1;
+  animation: pcLoadingPulse 1s infinite ease-in-out;
+}
+
+.pc-loading-dots span:nth-child(2) {
+  animation-delay: 0.15s;
+}
+
+.pc-loading-dots span:nth-child(3) {
+  animation-delay: 0.3s;
+}
+
+@keyframes pcLoadingPulse {
+  0%, 100% {
+    opacity: 0.35;
+    transform: scale(0.85);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+  </style>
+</head>
+<body>
+    <div id="loading">
+    <div class="pc-card pc-loading-card">
+      <div class="pc-icon-wrap">
+        <img src="icons/logo.png" alt="PriceCheck">
+      </div>
+      <div id="pcLoadingTitle" class="pc-title pc-loading-title">Reading page</div>
+      <div class="pc-copy pc-loading-copy">
+        PriceCheck is checking this page and preparing your comparison.
+      </div>
+      <div class="pc-loading-dots" aria-hidden="true">
+        <span></span><span></span><span></span>
+      </div>
+    </div>
+  </div>
+
+  <div id="unsupported">
+  <div class="pc-card">
+    <div class="pc-icon-wrap">
+      <img src="icons/logo.png" alt="PriceCheck">
+    </div>
+    <div class="pc-title">Sorry, this page is not supported.</div>
+    <div class="pc-copy">
+      PriceCheck could not identify this product from the current page.
+      You can still search manually.
+    </div>
+    <div class="pc-actions">
+      <button id="unsupportedOpenHere" class="pc-btn" type="button">
+        Search in sidebar
+      </button>
+      <button id="unsupportedOpenTab" class="pc-btn pc-btn-secondary" type="button">
+        Open a new tab
+      </button>
+    </div>
+  </div>
+</div>
+
+<div id="blocked">
+  <div class="pc-card">
+    <div class="pc-icon-wrap">
+      <img src="icons/logo.png" alt="PriceCheck">
+    </div>
+    <div class="pc-title">Sorry, this page is not supported.</div>
+    <div class="pc-copy">
+      This page blocked the embedded view. You can still search manually in the sidebar or open PriceCheck in a new tab.
+    </div>
+    <div class="pc-actions">
+      <button id="blockedOpenHere" class="pc-btn" type="button">
+        Search in sidebar
+      </button>
+      <button id="openLink" class="pc-btn pc-btn-secondary" type="button">
+        Open a new tab
+        </button>
+    </div>
+  </div>
+</div>
+
+  <iframe id="frame" allow="clipboard-read; clipboard-write"></iframe>
+
+  <script src="sidepanel.js"></script>
+</body>
+</html>
