@@ -685,6 +685,15 @@ app.post("/v1/observe", async (req, res) => {
     const effective_price_cents =
       p.effective_price_cents == null ? null : Number(p.effective_price_cents);
     const hasEffectiveCoupon = Number.isFinite(effective_price_cents);
+    const hasAnyCouponSignal =
+      !!coupon_text ||
+      !!coupon_type ||
+      Number.isFinite(coupon_value_cents) ||
+      Number.isFinite(coupon_value_pct) ||
+      coupon_requires_clip === true ||
+      !!coupon_code ||
+      !!coupon_expires_at ||
+      hasEffectiveCoupon;
     const coupon_observed_at = p.coupon_observed_at ? new Date(p.coupon_observed_at) : null;
 
     // A) Insert history row (price_history only stores changing stuff)
@@ -707,9 +716,9 @@ app.post("/v1/observe", async (req, res) => {
         storeSku,
         priceCents,
         observedAt,
-        hasEffectiveCoupon ? coupon_text : null,
-        hasEffectiveCoupon && Number.isFinite(coupon_value_cents) ? coupon_value_cents : null,
-        hasEffectiveCoupon && Number.isFinite(coupon_value_pct) ? coupon_value_pct : null,
+        hasAnyCouponSignal ? coupon_text : null,
+        hasAnyCouponSignal && Number.isFinite(coupon_value_cents) ? coupon_value_cents : null,
+        hasAnyCouponSignal && Number.isFinite(coupon_value_pct) ? coupon_value_pct : null,
         hasEffectiveCoupon ? effective_price_cents : null,
       ]
     );
@@ -762,7 +771,7 @@ app.post("/v1/observe", async (req, res) => {
 
     // C) Update coupon fields in listings when we have any coupon signal
     // Rule: only overwrite when coupon_observed_at is newer, otherwise keep existing.
-    const hasAnyCouponSignal = Number.isFinite(effective_price_cents);
+    // keep coupon updates even when the page shows a clip coupon but no exact discount amount
 
     let upCoupon = { rowCount: 0 };
 

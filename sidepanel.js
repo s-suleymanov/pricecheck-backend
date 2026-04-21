@@ -123,14 +123,6 @@ function loadUrl(url) {
 
   frame.addEventListener("load", onLoad, { once: true });
   frame.src = next;
-
-  // If loading takes too long, show blocked message
-  setTimeout(() => {
-    if (token !== currentToken) return;
-    if (loading.style.display === "flex") {
-      showBlocked(next);
-    }
-  }, 5000);
 }
 
 async function sendMessage(msg, timeoutMs = 2500) {

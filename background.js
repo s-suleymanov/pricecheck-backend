@@ -49,56 +49,56 @@ chrome.runtime.onInstalled.addListener((details) => {
   });
 });
 
+async function openPanelForTab(tabLike = null) {
+  if (!chrome.sidePanel?.open) {
+    console.log("[pc:bg] sidePanel.open unavailable");
+    return { ok: false, error: "sidepanel_open_unavailable" };
+  }
+
+  const tab =
+    tabLike?.id
+      ? tabLike
+      : await getActiveTabForCurrentWindow();
+
+  if (!tab?.id) {
+    console.log("[pc:bg] openPanelForTab: no active tab id");
+    return { ok: false, error: "no_active_tab" };
+  }
+
+  const sourceUrl = String(tab.url || "").trim();
+  const supported = isCoreStore(sourceUrl);
+
+  const prepPromise = Promise.all([
+    setPanelEnabled(tab.id, true),
+    applyPanelOptions(tab.id, true),
+    setPanelState(tab.id, {
+      mode: supported ? "loading" : "unsupported",
+      sourceUrl,
+      url: supported ? "" : `${SITE_BASE}/`,
+    }),
+  ]).catch((e) => {
+    console.log("[pc:bg] openPanelForTab prep failed", String(e));
+  });
+
+  await chrome.sidePanel.open({ tabId: tab.id });
+
+  await prepPromise;
+
+  clearSyncTabUrl(tab.id);
+
+  if (supported) {
+    syncPanelForTab(tab).catch((e) =>
+      console.log("[pc:bg] openPanelForTab sync failed", String(e))
+    );
+  }
+
+  return { ok: true, tabId: tab.id };
+}
+
 chrome.action.onClicked.addListener((clickedTab) => {
-  const run = async () => {
-    try {
-      if (!chrome.sidePanel?.open) {
-        console.log("[pc:bg] sidePanel.open unavailable");
-        return;
-      }
-
-      const tab =
-        clickedTab?.id
-          ? clickedTab
-          : await getActiveTabForCurrentWindow();
-
-      if (!tab?.id) {
-        console.log("[pc:bg] action click: no active tab id");
-        return;
-      }
-
-      const sourceUrl = String(tab.url || "").trim();
-      const supported = isCoreStore(sourceUrl);
-
-      const prepPromise = Promise.all([
-        setPanelEnabled(tab.id, true),
-        applyPanelOptions(tab.id, true),
-        setPanelState(tab.id, {
-          mode: supported ? "loading" : "unsupported",
-          sourceUrl,
-          url: supported ? "" : `${SITE_BASE}/`,
-        }),
-      ]).catch((e) => {
-        console.log("[pc:bg] action click prep failed", String(e));
-      });
-
-      await chrome.sidePanel.open({ tabId: tab.id });
-
-      await prepPromise;
-
-      clearSyncTabUrl(tab.id);
-
-      if (supported) {
-        syncPanelForTab(tab).catch((e) =>
-          console.log("[pc:bg] action click sync failed", String(e))
-        );
-      }
-    } catch (e) {
-      console.log("[pc:bg] action click failed", String(e));
-    }
-  };
-
-  run();
+  openPanelForTab(clickedTab).catch((e) => {
+    console.log("[pc:bg] action click failed", String(e));
+  });
 });
 
 // Check if URL is from a supported store
@@ -119,6 +119,13 @@ function isCoreStore(url = "") {
 // Check if URL is a valid web URL
 function isWebUrl(url = "") {
   return /^https?:\/\//i.test(String(url || ""));
+}
+
+function compareStoreKey(s = "") {
+  return String(s || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, "");
 }
 
 // Track last sync URLs per tab
@@ -184,8 +191,6 @@ async function closeAnySidePanelForTab(tab) {
   if (!chrome.sidePanel?.close || !tab) return;
 
   if (tab.id) {
-    markPanelClosed(tab.id);
-
     try {
       await chrome.sidePanel.close({ tabId: tab.id });
     } catch (e) {
@@ -526,21 +531,24 @@ async function resolveDashboardTarget(tab, observePayload = null) {
   }
 
   if (/bestbuy\./i.test(url)) {
-    const bby = observedBestBuySku || parseBestBuySku(url);
-    if (!bby) {
-      return { mode: "unsupported", pci: "", fallbackKind: "", fallbackValue: "" };
-    }
-
-    const data = await apiCompareByStoreSKU("bestbuy", bby);
-    const results = Array.isArray(data?.results) ? data.results : [];
-
-    return {
-      mode: "dashboard",
-      pci: firstPci(results),
-      fallbackKind: "bby",
-      fallbackValue: bby,
-    };
+  const bby = observedBestBuySku || parseBestBuySku(url);
+  if (!bby) {
+    return { mode: "unsupported", pci: "", fallbackKind: "", fallbackValue: "" };
   }
+
+  const data = await apiCompareByStoreSKU("bestbuy", bby);
+  const results = Array.isArray(data?.results) ? data.results : [];
+  if (!results.length) {
+    return { mode: "unsupported", pci: "", fallbackKind: "", fallbackValue: "" };
+  }
+
+  return {
+    mode: "dashboard",
+    pci: firstPci(results),
+    fallbackKind: "bby",
+    fallbackValue: bby,
+  };
+}
 
   if (isWebUrl(url)) {
     const data = await apiCompareByURL(url);
@@ -572,6 +580,99 @@ async function resolveDashboardTarget(tab, observePayload = null) {
   };
 }
 
+async function checkMatchForTab(tabLike = null) {
+  const tab =
+    tabLike?.id
+      ? tabLike
+      : await getActiveTabForCurrentWindow();
+
+  if (!tab?.id || !tab?.url) {
+    return { ok: false, matched: false, reason: "no_active_tab", otherStores: [] };
+  }
+
+  const sourceUrl = String(tab.url || "").trim();
+  if (!isCoreStore(sourceUrl)) {
+    return { ok: true, matched: false, reason: "unsupported_site", otherStores: [] };
+  }
+
+  const observePayload = await scrapeObservePayload(tab.id).catch(() => null);
+
+  const currentStore =
+    compareStoreKey(observePayload?.store) ||
+    (sourceUrl.includes("amazon.") ? "amazon" :
+     sourceUrl.includes("target.") ? "target" :
+     sourceUrl.includes("walmart.") ? "walmart" :
+     sourceUrl.includes("bestbuy.") ? "bestbuy" : "");
+
+  let data = { results: [] };
+
+  if (currentStore === "amazon") {
+    const asin =
+      (/^[A-Z0-9]{10}$/i.test(String(observePayload?.store_sku || "").trim())
+        ? String(observePayload.store_sku).trim().toUpperCase()
+        : parseAmazonAsin(sourceUrl));
+
+    if (!asin) {
+      return { ok: true, matched: false, reason: "missing_anchor", otherStores: [] };
+    }
+
+    data = await apiCompareByASIN(asin);
+  } else if (currentStore === "target") {
+    const tcin =
+      (/^\d{8}$/.test(String(observePayload?.store_sku || "").trim())
+        ? String(observePayload.store_sku).trim()
+        : parseTargetTcin(sourceUrl));
+
+    if (!tcin) {
+      return { ok: true, matched: false, reason: "missing_anchor", otherStores: [] };
+    }
+
+    data = await apiCompareByStoreSKU("target", tcin);
+  } else if (currentStore === "walmart") {
+    const itemId =
+      (/^\d{6,20}$/.test(String(observePayload?.store_sku || "").trim())
+        ? String(observePayload.store_sku).trim()
+        : parseWalmartItemId(sourceUrl));
+
+    if (!itemId) {
+      return { ok: true, matched: false, reason: "missing_anchor", otherStores: [] };
+    }
+
+    data = await apiCompareByStoreSKU("walmart", itemId);
+  } else if (currentStore === "bestbuy") {
+    const sku =
+      (/^\d{4,10}$/.test(String(observePayload?.store_sku || "").trim())
+        ? String(observePayload.store_sku).trim()
+        : parseBestBuySku(sourceUrl));
+
+    if (!sku) {
+      return { ok: true, matched: false, reason: "missing_anchor", otherStores: [] };
+    }
+
+    data = await apiCompareByStoreSKU("bestbuy", sku);
+  } else {
+    return { ok: true, matched: false, reason: "unsupported_site", otherStores: [] };
+  }
+
+  const results = Array.isArray(data?.results) ? data.results : [];
+
+  const otherStores = [
+    ...new Set(
+      results
+        .map((r) => compareStoreKey(r?.store))
+        .filter((store) => store && store !== currentStore)
+    )
+  ];
+
+  return {
+    ok: true,
+    matched: otherStores.length > 0,
+    reason: otherStores.length > 0 ? "cross_store_match" : "no_cross_store_match",
+    otherStores,
+    resultCount: results.length,
+  };
+}
+
 // Scrape observe payload from content script
 async function scrapeObservePayload(tabId) {
   for (const waitMs of [0, 350, 900]) {
@@ -591,7 +692,6 @@ async function scrapeObservePayload(tabId) {
   return null;
 }
 
-// Main sync function for a tab
 async function syncPanelForTab(tab) {
   try {
     if (!tab?.id) {
@@ -630,15 +730,12 @@ async function syncPanelForTab(tab) {
       return;
     }
 
-    // Page is supported, make sure we're in loading state
-    console.log("[pc:bg] page is supported, ensuring loading state");
     await setPanelState(tab.id, {
       mode: "loading",
       sourceUrl,
       url: "",
     });
 
-    // Scrape product data from the page
     console.log("[pc:bg] scraping product data...");
     const observePayload = await scrapeObservePayload(tab.id);
     console.log("[pc:bg] scrape result:", observePayload);
@@ -677,10 +774,15 @@ async function syncPanelForTab(tab) {
 
     console.log("[pc:bg] fallback values:", { fallbackKind, fallbackValue });
 
-    // Send observe payload if we have price data
-    if (observePayload && Number.isFinite(observePayload.price_cents)) {
+    // Observe first so brand new products still get inserted.
+    if (
+      observePayload &&
+      observePayload.store &&
+      observePayload.store_sku &&
+      Number.isFinite(observePayload.price_cents)
+    ) {
       try {
-        console.log("[pc:bg] sending observe payload...");
+        console.log("[pc:bg] sending observe payload before resolve...");
         const observeResp = await apiObserve(observePayload);
         if (observeResp) console.log("[pc:bg] observe result", observeResp);
       } catch (e) {
@@ -692,53 +794,52 @@ async function syncPanelForTab(tab) {
       console.log("[pc:bg] no observe payload at all");
     }
 
-    // Resolve the dashboard target
+    let resolved = null;
+
     try {
       console.log("[pc:bg] resolving dashboard target...");
-      const resolved = await resolveDashboardTarget(tab, observePayload);
+      resolved = await resolveDashboardTarget(tab, observePayload);
       console.log("[pc:bg] resolve result:", resolved);
+    } catch (e) {
+      console.log("[pc:bg] resolve failed with error:", String(e));
+      resolved = null;
+    }
 
-      if (!resolved || resolved.mode === "unsupported") {
-        console.log("[pc:bg] could not resolve dashboard, showing unsupported");
-        await setPanelState(tab.id, {
-          mode: "unsupported",
-          sourceUrl,
-          url: `${SITE_BASE}/`,
-        });
-        return;
-      }
-
-      const finalUrl = dashboardUrlFromResolved({
-        pci: resolved?.pci || "",
-        fallbackKind: resolved?.fallbackKind || fallbackKind,
-        fallbackValue: resolved?.fallbackValue || fallbackValue,
-        title: tab.title || "product",
-      });
-
-      console.log("[pc:bg] loading dashboard URL:", finalUrl);
+    // Never show unsupported on the 4 supported stores.
+    if (!resolved || resolved.mode === "unsupported") {
+      console.log("[pc:bg] no dashboard match after observe, showing manual sidebar page");
       await setPanelState(tab.id, {
         mode: "iframe",
         sourceUrl,
-        url: finalUrl,
-      });
-    } catch (e) {
-      console.log("[pc:bg] resolve failed with error:", String(e));
-
-      await setPanelState(tab.id, {
-        mode: "unsupported",
-        sourceUrl,
         url: `${SITE_BASE}/`,
       });
+      return;
     }
+
+    const finalUrl = dashboardUrlFromResolved({
+      pci: resolved?.pci || "",
+      fallbackKind: resolved?.fallbackKind || fallbackKind,
+      fallbackValue: resolved?.fallbackValue || fallbackValue,
+      title: tab.title || "product",
+    });
+
+    console.log("[pc:bg] loading dashboard URL:", finalUrl);
+    await setPanelState(tab.id, {
+      mode: "iframe",
+      sourceUrl,
+      url: finalUrl,
+    });
   } catch (e) {
     console.log("[pc:bg] syncPanelForTab crashed:", String(e));
-    
-    // Try to show unsupported state as fallback
+
     try {
       if (tab?.id) {
+        const sourceUrl = String(tab.url || "").trim();
+        const supported = isCoreStore(sourceUrl);
+
         await setPanelState(tab.id, {
-          mode: "unsupported",
-          sourceUrl: String(tab.url || ""),
+          mode: supported ? "iframe" : "unsupported",
+          sourceUrl,
           url: `${SITE_BASE}/`,
         });
       }
@@ -802,7 +903,7 @@ async function readActiveTabState() {
   };
 }
 
-chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (!msg?.type) return;
 
   (async () => {
@@ -814,22 +915,32 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       return await readActiveTabState();
     }
 
+    if (msg.type === "PC_CHECK_MATCH_FOR_TAB") {
+      const senderTab = sender?.tab?.id ? sender.tab : null;
+      return await checkMatchForTab(senderTab);
+    }
+
+    if (msg.type === "PC_OPEN_SIDEPANEL_FOR_TAB") {
+      const senderTab = sender?.tab?.id ? sender.tab : null;
+      return await openPanelForTab(senderTab);
+    }
+
     if (msg.type === "PC_OPEN_MANUAL_SEARCH") {
-  const tab = await getActiveTabForCurrentWindow();
-  if (!tab?.id) return { ok: false, error: "no_active_tab" };
+      const senderTab = sender?.tab?.id ? sender.tab : await getActiveTabForCurrentWindow();
+      if (!senderTab?.id) return { ok: false, error: "no_active_tab" };
 
-  await setPanelEnabled(tab.id, true);
-  await applyPanelOptions(tab.id, true);
+      await setPanelEnabled(senderTab.id, true);
+      await applyPanelOptions(senderTab.id, true);
 
-  const next = String(msg.url || `${SITE_BASE}/`).trim() || `${SITE_BASE}/`;
-  const state = await setPanelState(tab.id, {
-    mode: "iframe",
-    sourceUrl: String(tab.url || ""),
-    url: next,
-  });
+      const next = String(msg.url || `${SITE_BASE}/`).trim() || `${SITE_BASE}/`;
+      const state = await setPanelState(senderTab.id, {
+        mode: "iframe",
+        sourceUrl: String(senderTab.url || ""),
+        url: next,
+      });
 
-  return { ok: true, tabId: tab.id, state };
-}
+      return { ok: true, tabId: senderTab.id, state };
+    }
 
     return { ok: false, error: "unknown_message" };
   })()
@@ -893,8 +1004,20 @@ chrome.tabs.onActivated.addListener(async ({ tabId }) => {
     }
 
     await applyPanelOptions(tabId, true);
-    clearSyncTabUrl(tabId);
-    await syncPanelForTab(tab);
+
+    const state = await getPanelState(tabId);
+
+    if (!state) {
+      clearSyncTabUrl(tabId);
+      await syncPanelForTab(tab);
+      return;
+    }
+
+    if (String(state.sourceUrl || "").trim() !== sourceUrl) {
+      clearSyncTabUrl(tabId);
+      await syncPanelForTab(tab);
+      return;
+    }
   } catch (e) {
     console.log("[pc:bg] onActivated sync failed", String(e));
   }

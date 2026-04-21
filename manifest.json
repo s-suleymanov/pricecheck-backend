@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "PriceCheck",
   "version": "0.9.2",
-  "description": "A more intelligent way to shop.",
+  "description": "A more intelligent way to shop",
   "action": {
     "default_title": "Open PriceCheck"
   },
